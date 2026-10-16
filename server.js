@@ -200,7 +200,27 @@ function safeDate(ct) {
 }
 
 function sanitizeFilename(name, maxLen = 80) {
-  return name.replace(/[<>:"/\\|?*]/g, "_").replace(/^[. ]+|[. ]+$/g, "").slice(0, maxLen) || "untitled";
+  let safe = name
+    // Normalize line breaks and tabs as normal whitespace.
+    .replace(/[\r\n\t]+/g, " ")
+    // Remove the remaining ASCII control characters.
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    // Replace characters forbidden in Windows filenames.
+    .replace(/[<>:"/\\|?*]/g, "_")
+    // Collapse repeated whitespace.
+    .replace(/\s+/g, " ")
+    // Windows forbids leading/trailing dots and spaces.
+    .replace(/^[. ]+|[. ]+$/g, "")
+    .slice(0, maxLen)
+    // Truncation itself may leave a trailing dot or space.
+    .replace(/[. ]+$/g, "");
+
+  // Reserved Windows device names are invalid even with an extension.
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(safe)) {
+    safe = `_${safe}`;
+  }
+
+  return safe || "untitled";
 }
 
 function stripCitations(str) {
