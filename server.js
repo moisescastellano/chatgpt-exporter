@@ -148,7 +148,17 @@ async function apiGet(path, token) {
 
 async function apiFetchBinary(url, token) {
   const h = { ...HEADERS, Accept: "*/*" };
-  if (token) h.Authorization = `Bearer ${token}`;
+
+  const target = new URL(url, "https://chatgpt.com/");
+  const host = target.hostname.toLowerCase();
+  const isChatGptHost =
+    target.protocol === "https:" &&
+    (host === "chatgpt.com" || host.endsWith(".chatgpt.com"));
+
+  if (token && isChatGptHost) {
+    h.Authorization = `Bearer ${token}`;
+  }
+
   const resp = await retryOn429(() => debugFetch(url, { headers: h }));
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const buffer = Buffer.from(await resp.arrayBuffer());
@@ -1257,7 +1267,10 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                 totalFiles++;
                 try {
                   const { filename: dlName, buffer } = await downloadFile(ref.fileId, token, ref.filename);
-                  const actualName = deduplicateFilename(dlName || ref.filename, usedNames);
+                  const actualName = deduplicateFilename(
+                    sanitizeFilename(dlName || ref.filename),
+                    usedNames
+                  );
                   writeFileSync(join(convFilesDirFull, actualName), buffer);
                   zipFiles.push({ path: `${zipPrefix}files/${fname}/${actualName}`, data: buffer });
                   fileMap[ref.fileId] = `../files/${fname}/${actualName}`;
