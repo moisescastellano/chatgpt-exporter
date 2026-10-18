@@ -28,7 +28,7 @@ const __dirname = (() => {
 // ── Debug logging ─────────────────────────────────────────────────────
 
 const DEBUG      = process.argv.includes("--debug");
-const DEBUG_LOG  = join(dirname(process.execPath), "debug.log");
+const DEBUG_LOG  = join(__dirname, "debug.log");
 
 function dbg(msg, data) {
   if (!DEBUG) return;
