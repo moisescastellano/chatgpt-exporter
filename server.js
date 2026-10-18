@@ -12,7 +12,7 @@
  */
 
 import { createServer }                       from "node:http";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, appendFileSync, unlinkSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, appendFileSync, unlinkSync, readdirSync, openSync, readSync, closeSync, rmSync } from "node:fs";
 import { join, dirname, basename }             from "node:path";
 import { homedir }                            from "node:os";
 import { randomUUID }                         from "node:crypto";
@@ -199,6 +199,17 @@ function safeDate(ct) {
   } catch { return ""; }
 }
 
+function timestampMs(value) {
+  if (!value) return 0;
+
+  if (typeof value === "number") {
+    return value > 1e10 ? value : value * 1000;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
 function sanitizeFilename(name, maxLen = 80) {
   let safe = name
     // Normalize line breaks and tabs as normal whitespace.
@@ -223,6 +234,41 @@ function sanitizeFilename(name, maxLen = 80) {
   return safe || "untitled";
 }
 
+function findConversationJsonById(dir, conversationId) {
+  if (!existsSync(dir)) return null;
+
+  const suffix = `_${conversationId.slice(0, 8)}.json`;
+
+  const matches = readdirSync(dir)
+    .filter((name) => name.endsWith(suffix));
+
+  if (!matches.length) return null;
+
+  let best = null;
+
+  for (const name of matches) {
+    const path = join(dir, name);
+
+    try {
+      const convo = JSON.parse(readFileSync(path, "utf8"));
+      const updatedMs = timestampMs(convo.update_time);
+
+      if (!best || updatedMs > best.updatedMs) {
+        best = {
+          path,
+          name,
+          convo,
+          updatedMs,
+        };
+      }
+    } catch {
+      // Ignore unreadable/corrupt candidates and keep looking.
+    }
+  }
+
+  return best;
+}
+
 function stripCitations(str) {
   return str.replace(/\u3010[^\u3011]*\u3011/g, "");
 }
@@ -241,6 +287,26 @@ function deduplicateFilename(name, usedNames) {
   const deduped = `${base}_${i}${ext}`;
   usedNames.add(deduped);
   return deduped;
+}
+
+function removePreviousConversationFiles(existing, newJsonPath) {
+  if (!existing || existing.path === newJsonPath) return;
+
+  const oldJsonPath = existing.path;
+  const oldJsonDir  = dirname(oldJsonPath);
+  const oldBaseDir  = dirname(oldJsonDir);
+  const oldFname    = basename(oldJsonPath, ".json");
+
+  try { unlinkSync(oldJsonPath); } catch {}
+  try { unlinkSync(join(oldBaseDir, "markdown", `${oldFname}.md`)); } catch {}
+  try { unlinkSync(join(oldBaseDir, "html", `${oldFname}.html`)); } catch {}
+
+  try {
+    rmSync(join(oldBaseDir, "files", oldFname), {
+      recursive: true,
+      force: true,
+    });
+  } catch {}
 }
 
 // ── File reference extraction ────────────────────────────────────────
@@ -910,7 +976,9 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       _send(type, data);
       if      (type === "status")   log(`STATUS   ${data}`);
       else if (type === "progress") { const d = JSON.parse(data); log(`PROGRESS ${d.current}/${d.total} — ${d.title}`); }
-      else if (type === "done")     { const d = JSON.parse(data); log(`DONE     ${d.succeeded} new · ${d.skipped} resumed · ${d.failed} failed · output: ${d.output}`); }
+      else if (type === "done")     { const d = JSON.parse(data); log(`DONE     ${d.succeeded} new · ${d.updated || 0} updated · ` +    `${d.skipped} resumed · ${d.failed} failed · output: ${d.output}`
+  );
+}
       else if (type === "error_msg") log(`ERROR    ${data}`);
     };
 
@@ -1080,6 +1148,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     // ── Result accumulators ──────────────────────────────────────────
     let total             = 0;
     let newCount          = 0;
+    let updatedCount      = 0;
     let skipped           = 0;
     const failed          = [];
     let totalFiles        = 0;
@@ -1189,24 +1258,74 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
               }
             };
 
-            // Resume: new-format file exists
-            if (existsSync(jsonPath)) {
-              ensureHtml(JSON.parse(readFileSync(jsonPath, "utf8")), fname);
-              skipped++;
-              const done = newCount + skipped + failed.length;
-              if (skipped % 25 === 0 || done === total) {
-                const elapsed = (Date.now() - startTime) / 1000 / 60;
-                const rate    = elapsed > 0 ? Math.round(done / elapsed) : 0;
-                sendEvent("progress", JSON.stringify({
-                  current: done, total, title,
-                  stats: `${newCount} new · ${skipped} resumed · ${failed.length} failed · ${rate}/min`,
-                }));
+            // Smart resume: find an existing local copy by conversation ID,
+            // regardless of title changes or old filename format.
+            let existing = findConversationJsonById(convJsonDir, cid);
+
+            // A conversation may previously have been exported at root level
+            // and now belong to a Project.
+            if (!existing && projectName) {
+              existing = findConversationJsonById(jsonDir, cid);
+            }
+
+            let isUpdate = false;
+
+            if (existing) {
+              const remoteUpdatedMs = timestampMs(item.update_time);
+              const localUpdatedMs  = existing.updatedMs;
+
+              const localTitle = existing.convo.title || "Untitled";
+
+              const pathChanged =
+                existing.path !== jsonPath;
+
+              const titleChanged =
+                localTitle !== title;
+
+              const remoteIsNewer =
+                remoteUpdatedMs > 0 &&
+                remoteUpdatedMs > localUpdatedMs;
+
+              const localTimestampMissing =
+                localUpdatedMs === 0;
+
+              isUpdate =
+                titleChanged ||
+                remoteIsNewer ||
+                localTimestampMissing;
+
+              if (!isUpdate && !pathChanged) {
+                ensureHtml(existing.convo, fname);
+
+                skipped++;
+
+                const done =
+                  newCount + updatedCount + skipped + failed.length;
+
+                if (skipped % 25 === 0 || done === total) {
+                  const elapsed =
+                    (Date.now() - startTime) / 1000 / 60;
+
+                  const rate =
+                    elapsed > 0 ? Math.round(done / elapsed) : 0;
+
+                  sendEvent("progress", JSON.stringify({
+                    current: done,
+                    total,
+                    title,
+                    stats:
+                      `${newCount} new · ${updatedCount} updated · ` +
+                      `${skipped} resumed · ${failed.length} failed · ${rate}/min`,
+                  }));
+                }
+
+                return;
               }
-              return;
             }
 
             // Resume: old-format file exists — migrate to date-prefixed name, delete old files
-            if (existsSync(oldJsonPath)) {
+            if (!isUpdate && existsSync(oldJsonPath)) {
+              let migrated = false;
               try {
                 const jsonStr = readFileSync(oldJsonPath, "utf8");
                 const convo   = JSON.parse(jsonStr);
@@ -1221,26 +1340,35 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                 try { unlinkSync(oldJsonPath); } catch {}
                 try { unlinkSync(join(convMdDir,    `${oldFname}.md`));   } catch {}
                 try { unlinkSync(join(convHtmlDir,  `${oldFname}.html`)); } catch {}
-              } catch { /* non-fatal — fall through to fresh download */ }
-              skipped++;
-              const done1 = newCount + skipped + failed.length;
-              if (skipped % 25 === 0 || done1 === total) {
-                const el1 = (Date.now() - startTime) / 1000 / 60;
-                const r1  = el1 > 0 ? Math.round(done1 / el1) : 0;
-                sendEvent("progress", JSON.stringify({
-                  current: done1, total, title,
-                  stats: `${newCount} new · ${skipped} resumed · ${failed.length} failed · ${r1}/min`,
-                }));
+                  migrated = true;
+              } catch (e) {
+                log(`MIGRATE old-format "${title}" failed: ${e.message}`);
               }
-              return;
+              if (migrated) {
+                skipped++;
+                const done1 = newCount + updatedCount + skipped + failed.length;
+                if (skipped % 25 === 0 || done1 === total) {
+                  const el1 = (Date.now() - startTime) / 1000 / 60;
+                  const r1  = el1 > 0 ? Math.round(done1 / el1) : 0;
+                  sendEvent("progress", JSON.stringify({
+                    current: done1, total, title,
+                    stats: `${newCount} new · ${updatedCount} updated · ${skipped} resumed · ${failed.length} failed · ${r1}/min`,
+                  }));
+                }
+                return;
+              }
+
             }
 
             // Resume: conversation was saved in root but now belongs to a project — migrate
-            if (projectName) {
+            if (!isUpdate && projectName) {
               const srcNew = join(jsonDir, `${fname}.json`);
               const srcOld = join(jsonDir, `${oldFname}.json`);
               const src    = existsSync(srcNew) ? srcNew : existsSync(srcOld) ? srcOld : null;
               if (src) {
+
+                let migrated = false;
+
                 try {
                   const jsonStr  = readFileSync(src, "utf8");
                   const convo    = JSON.parse(jsonStr);
@@ -1257,21 +1385,31 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                   try { unlinkSync(join(mdDir,   `${srcFname}.md`));   } catch {}
                   try { unlinkSync(join(htmlDir, `${srcFname}.html`)); } catch {}
                   log(`MIGRATE  "${title}" root → projects/${sanitizeFilename(projectName)}/`);
-                } catch { /* non-fatal */ }
-                skipped++;
-                const done2 = newCount + skipped + failed.length;
-                if (skipped % 25 === 0 || done2 === total) {
-                  const el2 = (Date.now() - startTime) / 1000 / 60;
-                  const r2  = el2 > 0 ? Math.round(done2 / el2) : 0;
-                  sendEvent("progress", JSON.stringify({
-                    current: done2, total, title,
-                    stats: `${newCount} new · ${skipped} resumed · ${failed.length} failed · ${r2}/min`,
-                  }));
+                  migrated = true;
+                } catch (e) {
+                  log(`MIGRATE root→project "${title}" failed: ${e.message}`);
                 }
-                return;
+                if (migrated) {
+                  skipped++;
+                  const done2 = newCount + updatedCount + skipped + failed.length;
+                  if (skipped % 25 === 0 || done2 === total) {
+                    const el2 = (Date.now() - startTime) / 1000 / 60;
+                    const r2  = el2 > 0 ? Math.round(done2 / el2) : 0;
+                    sendEvent("progress", JSON.stringify({
+                      current: done2, total, title,
+                      stats: `${newCount} new · ${updatedCount} updated · ${skipped} resumed · ${failed.length} failed · ${r2}/min`,
+                    }));
+                  }
+                  return;
+                }
               }
             }
 
+            // If an existing copy was found but no local migration handled its
+            // path change, fall back to a fresh download and count it as an update.
+            if (existing && !isUpdate) {
+              isUpdate = true;
+            }
             const convo   = await apiGet(`conversation/${cid}`, token);
             const jsonStr = JSON.stringify(convo, null, 2);
 
@@ -1326,13 +1464,25 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
               } catch { /* non-fatal */ }
             }
 
-            newCount++;
-            const done    = newCount + skipped + failed.length;
+            if (isUpdate && existing?.path !== jsonPath) {
+              removePreviousConversationFiles(existing, jsonPath);
+            }
+
+            if (isUpdate) {
+              updatedCount++;
+            } else {
+              newCount++;
+            }
+
+            const done = newCount + updatedCount + skipped + failed.length;
+
             const elapsed = (Date.now() - startTime) / 1000 / 60;
             const rate    = elapsed > 0 ? Math.round(done / elapsed) : 0;
             sendEvent("progress", JSON.stringify({
               current: done, total, title,
-              stats: `${newCount} new · ${skipped} resumed · ${failed.length} failed · ${rate}/min`,
+              stats:
+                `${newCount} new · ${updatedCount} updated · ` +
+                `${skipped} resumed · ${failed.length} failed · ${rate}/min`,
             }));
 
             await sleep(DELAY); // rate-limit only after an actual API call
@@ -1370,6 +1520,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     sendEvent("done", JSON.stringify({
       total,
       succeeded: newCount,
+      updated: updatedCount,
       skipped,
       failed: failed.length,
       failedTitles: failed,
@@ -1456,7 +1607,10 @@ const server = createServer((req, res) => {
         } else if (type === "done") {
           const d = JSON.parse(data);
           process.stdout.write(`\r\x1b[2K`);
-          console.log(`\n✓ Done — ${d.succeeded} new · ${d.skipped} resumed · ${d.failed} failed`);
+          console.log(
+            `\n✓ Done — ${d.succeeded} new · ${d.updated || 0} updated · ` +
+            `${d.skipped} resumed · ${d.failed} failed`
+          );
           console.log(`  Saved to: ${d.output}\n`);
         } else if (type === "error_msg") {
           console.error(`\n✗ ${data}\n`);
