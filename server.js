@@ -102,41 +102,92 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── API helpers ──────────────────────────────────────────────────────
 
-const MAX_RETRIES   = 8;
-const BACKOFF_BASE  = 5000; // 5s, 10s, 20s, 40s, 80s, 160s, 300s (capped)
-const BACKOFF_CAP   = 300000; // 5 minutes max
+const API_MIN_INTERVAL_MS = 1000;
 
-// Global cooldown — shared across all parallel workers.
-// When ONE request hits 429, ALL subsequent requests wait until cooldownUntil.
-let cooldownUntil = 0;
-let onCooldown    = null; // optional callback: (waitMs, attempt) => void
+// All ChatGPT API requests share one paced queue.
+// External signed download URLs are not part of this queue.
+let nextApiRequestAt = 0;
+let apiRequestChain  = Promise.resolve();
+let rateLimitStopped = false;
+let onRateLimitStop  = null;
 
-async function waitForCooldown() {
-  const now = Date.now();
-  if (cooldownUntil > now) await sleep(cooldownUntil - now);
-}
+class RateLimitStopError extends Error {
+  constructor(retryAfter = null) {
+    const detail = retryAfter
+      ? ` Retry-After: ${retryAfter}.`
+      : "";
 
-async function retryOn429(fn) {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    await waitForCooldown(); // respect any active global cooldown
-    const resp = await fn();
-    if (resp.status !== 429) return resp;
-    if (attempt === MAX_RETRIES) return resp; // give up after all retries
-    const retryAfter = resp.headers.get("retry-after");
-    const waitMs = Math.min(
-      retryAfter ? parseInt(retryAfter, 10) * 1000 : BACKOFF_BASE * Math.pow(2, attempt),
-      BACKOFF_CAP
+    super(
+      `ChatGPT rate limit reached.${detail} ` +
+      `Export paused. Try again later; rerunning the export will resume ` +
+      `from the conversations already saved.`
     );
-    // Set global cooldown so other workers also pause
-    cooldownUntil = Math.max(cooldownUntil, Date.now() + waitMs);
-    dbg(`429 rate limited — global cooldown ${Math.round(waitMs / 1000)}s (retry ${attempt + 1}/${MAX_RETRIES})`);
-    if (onCooldown) try { onCooldown(waitMs, attempt + 1); } catch { /* ignore */ }
-    await sleep(waitMs);
+
+    this.name = "RateLimitStopError";
+    this.retryAfter = retryAfter;
   }
 }
 
+function resetRateLimiter() {
+  nextApiRequestAt = 0;
+  apiRequestChain  = Promise.resolve();
+  rateLimitStopped = false;
+  onRateLimitStop  = null;
+}
+
+async function pacedChatGptFetch(fn) {
+  const run = apiRequestChain.then(async () => {
+    if (rateLimitStopped) {
+      throw new RateLimitStopError();
+    }
+
+    const now = Date.now();
+    const waitMs = Math.max(0, nextApiRequestAt - now);
+
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    if (rateLimitStopped) {
+      throw new RateLimitStopError();
+    }
+
+    nextApiRequestAt = Date.now() + API_MIN_INTERVAL_MS;
+
+    const resp = await fn();
+
+    if (resp.status === 429) {
+      rateLimitStopped = true;
+
+      const retryAfter = resp.headers.get("retry-after");
+      const err = new RateLimitStopError(retryAfter);
+
+      dbg("429 rate limited — stopping export", {
+        retryAfter,
+      });
+
+      if (onRateLimitStop) {
+        try {
+          onRateLimitStop(err.message);
+        } catch {
+          // ignore notification failure
+        }
+      }
+
+      throw err;
+    }
+
+    return resp;
+  });
+
+  // A rejected request must not permanently break the queue.
+  apiRequestChain = run.catch(() => {});
+
+  return run;
+}
+
 async function apiGet(path, token) {
-  const resp = await retryOn429(() => debugFetch(`${API_BASE}/${path}`, {
+  const resp = await pacedChatGptFetch(() => debugFetch(`${API_BASE}/${path}`, {
     headers: { ...HEADERS, Authorization: `Bearer ${token}` },
   }));
   if (!resp.ok) {
@@ -159,7 +210,9 @@ async function apiFetchBinary(url, token) {
     h.Authorization = `Bearer ${token}`;
   }
 
-  const resp = await retryOn429(() => debugFetch(url, { headers: h }));
+  const resp = isChatGptHost
+    ? await pacedChatGptFetch(() => debugFetch(url, { headers: h }))
+    : await debugFetch(url, { headers: h });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const buffer = Buffer.from(await resp.arrayBuffer());
   const contentType = resp.headers.get("content-type") || "";
@@ -368,6 +421,7 @@ async function downloadFile(fileId, token, fallbackName, debugLog, gizmoId) {
         return { filename, buffer };
       }
     } catch (e) {
+      if (e instanceof RateLimitStopError) throw e;
       if (debugLog) debugLog(`files/${fileId}/download?gizmo_id failed: ${e.message}`);
     }
   }
@@ -382,7 +436,10 @@ async function downloadFile(fileId, token, fallbackName, debugLog, gizmoId) {
       if (debugLog) debugLog(`files/${fileId}: ${JSON.stringify(meta2)}`);
       url = meta2.download_url || meta2.url || meta2.file_url || meta2.presigned_url || meta2.signed_url;
       if (url) meta = meta2;
-    } catch { /* ignore fallback failure */ }
+    } catch (e) {
+      if (e instanceof RateLimitStopError) throw e;
+      /* ignore fallback failure */
+    }
   }
 
   if (!url) throw new Error(`No download_url (keys: ${Object.keys(meta).join(",")})`);
@@ -929,6 +986,9 @@ if(location.hash){
 // ── Export logic ─────────────────────────────────────────────────────
 
 async function runExport(token, outputDir, concurrency, createZip, keepAwake, exportOptions, sendEvent) {
+
+  resetRateLimiter();
+
   // Prevent macOS sleep during export
   // Kill any orphaned caffeinate from a previous run before starting a new one
   if (global._caffeinate) { try { global._caffeinate.kill(); } catch {} global._caffeinate = null; }
@@ -982,12 +1042,14 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       else if (type === "error_msg") log(`ERROR    ${data}`);
     };
 
-    // Surface rate-limit cooldowns in the UI and main log (not just debug.log)
-    onCooldown = (waitMs, attempt) => {
-      const secs = Math.round(waitMs / 1000);
-      const msg  = `Rate limited by ChatGPT — pausing ${secs}s (retry ${attempt}/${MAX_RETRIES})`;
+    onRateLimitStop = (msg) => {
       log(`RATE     ${msg}`);
-      try { _send("status", msg); } catch { /* ignore */ }
+
+      try {
+        _send("status", msg);
+      } catch {
+        // ignore UI notification failure
+      }
     };
 
     const zipFiles = [];
@@ -1002,7 +1064,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
         let cursor = null;
         while (true) {
           const qs   = `limit=20${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`;
-          const data = await retryOn429(() => debugFetch(`${API_BASE_PUB}/gizmos/discovery/mine?${qs}`, {
+          const data = await pacedChatGptFetch(() => debugFetch(`${API_BASE_PUB}/gizmos/discovery/mine?${qs}`, {
             headers: { ...HEADERS, Authorization: `Bearer ${token}` },
           })).then(async (r) => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1031,6 +1093,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
         sendEvent("status", `Exported ${gptCount} GPT(s).`);
         log(`GPT export done — ${gptCount} GPT(s)`);
       } catch (e) {
+        if (e instanceof RateLimitStopError) throw e;
         log(`GPT export skipped: ${e.message}`);
       }
     }
@@ -1043,7 +1106,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
         let cursor = null;
         while (true) {
           const qs   = `owned_only=true&conversations_per_gizmo=0&limit=20${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`;
-          const data = await retryOn429(() => debugFetch(`${API_BASE}/gizmos/snorlax/sidebar?${qs}`, {
+          const data = await pacedChatGptFetch(() => debugFetch(`${API_BASE}/gizmos/snorlax/sidebar?${qs}`, {
             headers: { ...HEADERS, Authorization: `Bearer ${token}` },
           })).then(async (r) => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1066,6 +1129,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
           await sleep(DELAY);
         }
       } catch (e) {
+        if (e instanceof RateLimitStopError) throw e;
         log(`Projects fetch skipped: ${e.message}`);
       }
     }
@@ -1094,7 +1158,10 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             cur = data.cursor || data.next_cursor || null;
             if (!cur) break;
             await sleep(DELAY);
-          } catch { break; }
+          } catch (e) {
+            if (e instanceof RateLimitStopError) throw e;
+            break;
+          }
         }
       }
     }
@@ -1132,15 +1199,22 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                   writeFileSync(join(resDir, safe), buffer);
                   zipFiles.push({ path: `projects/${projSafe}/resources/${safe}`, data: buffer });
                   log(`PROJECT  "${projName}" resource: ${dlName || fileName}`);
-                } catch (e) { log(`PROJECT  "${projName}" file failed: ${e.message}`); }
+                } catch (e) {
+                  if (e instanceof RateLimitStopError) throw e;
+                  log(`PROJECT  "${projName}" file failed: ${e.message}`);
+                }
               }
             }
-          } catch { /* resources may not exist */ }
+          } catch (e) {
+            if (e instanceof RateLimitStopError) throw e;
+            /* resources may not exist */
+          }
 
           log(`PROJECT  "${projName}" exported`);
         }
         if (allProjects.length) sendEvent("status", `Exported ${allProjects.length} project(s).`);
       } catch (e) {
+        if (e instanceof RateLimitStopError) throw e;
         log(`Projects export skipped: ${e.message}`);
       }
     }
@@ -1227,6 +1301,9 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
         const tasks = allConversations.map((item) => async () => {
           await sem.acquire();
           try {
+
+            if (rateLimitStopped) return;
+
             const { id: cid, title: rawTitle, projectName } = item;
             const title    = rawTitle || "Untitled";
             const safe     = sanitizeFilename(title);
@@ -1434,6 +1511,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                   fileMap[ref.fileId] = `../files/${fname}/${actualName}`;
                   await sleep(DELAY);
                 } catch (e) {
+                  if (e instanceof RateLimitStopError) throw e;
                   failedFiles++;
                   failedFileDetails.push(`${ref.filename} (${ref.fileId}): ${e.message}`);
                 }
@@ -1488,6 +1566,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             await sleep(DELAY); // rate-limit only after an actual API call
 
           } catch (e) {
+            if (e instanceof RateLimitStopError) return;
             failed.push(item.title || "Untitled");
             console.error(`[error] "${item.title}": ${e.message}`);
             log(`FAILED   "${item.title}": ${e.message}`);
@@ -1517,8 +1596,16 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     }
 
     const projectCount = doProjs ? allProjects.length : 0;
+
+    const processed = newCount + updatedCount + skipped + failed.length;
+
+    const remaining = Math.max(0, total - processed);
+
     sendEvent("done", JSON.stringify({
       total,
+      processed,
+      remaining,
+      rateLimited: rateLimitStopped,
       succeeded: newCount,
       updated: updatedCount,
       skipped,
@@ -1534,11 +1621,14 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     }));
 
   } catch (e) {
-    sendEvent("error_msg", `Export failed: ${e.message}`);
+    if (e instanceof RateLimitStopError) {
+      sendEvent("error_msg", e.message);
+    } else {
+      sendEvent("error_msg", `Export failed: ${e.message}`);
+    }
   } finally {
     if (caffeinate) { try { caffeinate.kill(); } catch { /* ignore */ } global._caffeinate = null; }
-    onCooldown = null;     // reset cooldown hook for next run
-    cooldownUntil = 0;
+    resetRateLimiter();
   }
 }
 
