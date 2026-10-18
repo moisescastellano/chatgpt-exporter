@@ -530,7 +530,7 @@
           if (d.total === 0) {
             showResult('success', 'No conversations found in your account.');
           } else {
-            let msg = 'Done! ' + d.succeeded + ' new · ' + d.skipped + ' resumed · ' + d.failed + ' failed';
+            let msg = 'Done! ' + d.succeeded + ' new · ' + (d.updated || 0) + ' updated · ' + d.skipped + ' resumed · ' +  d.failed + ' failed';
             if (d.totalFiles > 0) msg += '<br>' + (d.totalFiles - d.failedFiles) + ' of ' + d.totalFiles + ' files downloaded.';
             if (d.projects   > 0) msg += '<br>' + d.projects + ' project(s) exported.';
             if (d.gpts       > 0) msg += '<br>' + d.gpts + ' GPT(s) exported to <code>gpts/</code>';
