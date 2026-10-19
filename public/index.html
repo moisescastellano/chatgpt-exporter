@@ -112,8 +112,10 @@
   .date-row { display: flex; align-items: flex-end; gap: 8px; }
   .date-field { display: flex; flex-direction: column; gap: 4px; flex: 1; }
   .date-field label { font-size: 12px; color: #64748b; }
-  .date-field input[type="date"] { background: #1e293b; border: 2px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 8px 10px; font-size: 13px; outline: none; width: 100%; transition: border-color 0.2s; }
-  .date-field input[type="date"]:focus { border-color: #3b82f6; }
+  .date-field input[type="date"],
+  .date-field input[type="text"] { background: #1e293b; border: 2px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 8px 10px; font-size: 13px; outline: none; width: 100%; transition: border-color 0.2s; }
+  .date-field input[type="date"]:focus,
+  .date-field input[type="text"]:focus { border-color: #3b82f6; }
   .date-sep { color: #64748b; font-size: 13px; padding-bottom: 10px; }
   .options-hint { font-size: 11px; color: #475569; margin-top: 6px; }
 
@@ -267,6 +269,23 @@
         </div>
       </div>
       <div class="options-group">
+        <div class="options-group-label">Markdown options</div>
+        <div class="opt-checks">
+          <label class="opt-check"><input type="checkbox" id="md-timestamps"> Message timestamps</label>
+          <label class="opt-check"><input type="checkbox" id="md-model-name"> Model name</label>
+        </div>
+        <div class="date-row" style="margin-top:10px">
+          <div class="date-field">
+            <label for="md-user-label">User label</label>
+            <input type="text" id="md-user-label" value="User">
+          </div>
+          <div class="date-field">
+            <label for="md-assistant-label">Assistant label</label>
+            <input type="text" id="md-assistant-label" value="Assistant">
+          </div>
+        </div>
+      </div>
+      <div class="options-group">
         <div class="options-group-label">Date range (conversations)</div>
         <div class="date-row">
           <div class="date-field">
@@ -325,6 +344,31 @@
     const body  = header.nextElementSibling;
     body.classList.toggle('hidden');
     arrow.classList.toggle('open');
+  }
+
+  function loadPrefs() {
+    try {
+      return JSON.parse(localStorage.getItem('cge_prefs') || '{}');
+    } catch {
+      return {};
+    }
+  }
+
+  function savePrefs(changes) {
+    const current = loadPrefs();
+    const merged = {
+      ...current,
+      ...changes,
+    };
+
+    if (changes.markdown) {
+      merged.markdown = {
+        ...(current.markdown || {}),
+        ...changes.markdown,
+      };
+    }
+
+    localStorage.setItem('cge_prefs', JSON.stringify(merged));
   }
 
   // ── In-browser folder picker ────────────────────────────────────────
@@ -390,11 +434,11 @@
   function fpSelect() {
     document.getElementById('output-dir').value = _fpCurrentPath;
     fpClose();
-    localStorage.setItem('cge_prefs', JSON.stringify({
+    savePrefs({
       outputDir: _fpCurrentPath,
       concurrency: document.getElementById('concurrency').value,
       keepAwake: document.getElementById('keep-awake').checked,
-    }));
+    });
   }
 
   function fpClose() {
@@ -437,12 +481,26 @@
   let _defaultDir = '';
   fetch('/config').then(r => r.json()).then(cfg => {
     _defaultDir = cfg.defaultDir;
-    const saved = JSON.parse(localStorage.getItem('cge_prefs') || '{}');
+    const saved = loadPrefs();
     const dirField = document.getElementById('output-dir');
     dirField.value       = saved.outputDir || cfg.defaultDir;
     dirField.placeholder = cfg.defaultDir;
     if (saved.concurrency)             document.getElementById('concurrency').value  = saved.concurrency;
-    if (saved.keepAwake !== undefined)  document.getElementById('keep-awake').checked = saved.keepAwake;
+    if (saved.keepAwake !== undefined) document.getElementById('keep-awake').checked = saved.keepAwake;
+
+    const markdown = saved.markdown || {};
+    if (markdown.messageTimestamps !== undefined) {
+      document.getElementById('md-timestamps').checked = markdown.messageTimestamps;
+    }
+    if (markdown.modelName !== undefined) {
+      document.getElementById('md-model-name').checked = markdown.modelName;
+    }
+    if (markdown.userLabel) {
+      document.getElementById('md-user-label').value = markdown.userLabel;
+    }
+    if (markdown.assistantLabel) {
+      document.getElementById('md-assistant-label').value = markdown.assistantLabel;
+    }
   });
 
   function startExport() {
@@ -460,6 +518,12 @@
         markdown: document.getElementById('opt-markdown').checked,
         html:     document.getElementById('opt-html').checked,
       },
+      markdown: {
+        messageTimestamps: document.getElementById('md-timestamps').checked,
+        modelName: document.getElementById('md-model-name').checked,
+        userLabel: document.getElementById('md-user-label').value.trim() || 'User',
+        assistantLabel: document.getElementById('md-assistant-label').value.trim() || 'Assistant',
+      },
       dateFrom: document.getElementById('opt-date-from').value,
       dateTo:   document.getElementById('opt-date-to').value,
     };
@@ -474,7 +538,12 @@
     if (!token) return alert('No "accessToken" found. Make sure you are logged in and copied the full page.');
 
     // Save preferences
-    localStorage.setItem('cge_prefs', JSON.stringify({ outputDir, concurrency, keepAwake }));
+    savePrefs({
+      outputDir,
+      concurrency,
+      keepAwake,
+      markdown: exportOptions.markdown,
+    });
 
     document.getElementById('export-btn').disabled      = true;
     document.getElementById('token-input').disabled     = true;

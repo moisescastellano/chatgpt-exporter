@@ -958,6 +958,13 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
   try {
     const CONCURRENCY = Math.max(1, Math.min(10, concurrency || 5));
     const fmts        = { json: true, markdown: true, html: true, ...(exportOptions?.formats || {}) };
+    const markdownOptions = {
+      messageTimestamps: false,
+      modelName: false,
+      userLabel: "User",
+      assistantLabel: "Assistant",
+      ...(exportOptions?.markdown || {}),
+    };
     const doGpts      = exportOptions?.gpts          !== false;
     const doProjs     = exportOptions?.projects      !== false;
     const doConvs     = exportOptions?.conversations !== false;
@@ -1357,7 +1364,11 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                 writeFileSync(jsonPath, jsonStr, "utf8");
                 if (fmts.markdown) {
                   mkdirSync(convMdDir, { recursive: true });
-                  writeFileSync(join(convMdDir, `${fname}.md`), conversationToMarkdown(convo, {}), "utf8");
+                  writeFileSync(
+                    join(convMdDir, `${fname}.md`),
+                    conversationToMarkdown(convo, {}, markdownOptions),
+                    "utf8"
+                  );
                 }
                 ensureHtml(convo, fname);
                 // Remove old-format files (json, md, html) to avoid duplicates
@@ -1401,7 +1412,11 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                   writeFileSync(jsonPath, jsonStr, "utf8");
                   if (fmts.markdown) {
                     mkdirSync(convMdDir, { recursive: true });
-                    writeFileSync(join(convMdDir, `${fname}.md`), conversationToMarkdown(convo, {}), "utf8");
+                    writeFileSync(
+                      join(convMdDir, `${fname}.md`),
+                      conversationToMarkdown(convo, {}, markdownOptions),
+                      "utf8"
+                    );
                   }
                   ensureHtml(convo, fname);
                   // Remove from root folder
@@ -1472,7 +1487,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
 
             // Write Markdown
             if (fmts.markdown) {
-              const mdStr = conversationToMarkdown(convo, fileMap);
+              const mdStr = conversationToMarkdown(convo, fileMap, markdownOptions);
               mkdirSync(convMdDir, { recursive: true });
               writeFileSync(join(convMdDir, `${fname}.md`), mdStr, "utf8");
               zipFiles.push({ path: `${zipPrefix}markdown/${fname}.md`, data: mdStr });
