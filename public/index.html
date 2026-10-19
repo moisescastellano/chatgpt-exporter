@@ -63,6 +63,10 @@
   }
   button:hover { background: #2563eb; }
   button:disabled { background: #475569; cursor: not-allowed; }
+  .secondary-action { margin-top: 10px; background: #334155; color: #e2e8f0; }
+  .secondary-action:hover { background: #475569; }
+  .secondary-action:disabled { background: #334155; color: #64748b; }
+  .action-hint { margin-top: 7px; text-align: center; font-size: 11px; color: #64748b; }
   .progress-section { margin-top: 24px; }
   .progress-bar-bg {
     width: 100%; height: 8px; background: #334155; border-radius: 4px;
@@ -320,6 +324,8 @@
   </div>
 
   <button id="export-btn" onclick="startExport()">Export conversations</button>
+  <button id="regenerate-md-btn" class="secondary-action" onclick="regenerateMarkdown()">Regenerate Markdown</button>
+  <div class="action-hint">Uses existing local JSON files. No ChatGPT requests are made.</div>
 
   <div id="progress-section" class="progress-section hidden">
     <div class="progress-bar-bg"><div class="progress-bar" id="progress-bar"></div></div>
@@ -503,6 +509,15 @@
     }
   });
 
+  function getMarkdownOptions() {
+    return {
+      messageTimestamps: document.getElementById('md-timestamps').checked,
+      modelName: document.getElementById('md-model-name').checked,
+      userLabel: document.getElementById('md-user-label').value.trim() || 'User',
+      assistantLabel: document.getElementById('md-assistant-label').value.trim() || 'Assistant',
+    };
+  }
+
   function startExport() {
     const raw         = document.getElementById('token-input').value.trim();
     const outputDir   = document.getElementById('output-dir').value.trim() || _defaultDir || '~/Desktop/chatgpt-export';
@@ -518,12 +533,7 @@
         markdown: document.getElementById('opt-markdown').checked,
         html:     document.getElementById('opt-html').checked,
       },
-      markdown: {
-        messageTimestamps: document.getElementById('md-timestamps').checked,
-        modelName: document.getElementById('md-model-name').checked,
-        userLabel: document.getElementById('md-user-label').value.trim() || 'User',
-        assistantLabel: document.getElementById('md-assistant-label').value.trim() || 'Assistant',
-      },
+      markdown: getMarkdownOptions(),
       dateFrom: document.getElementById('opt-date-from').value,
       dateTo:   document.getElementById('opt-date-to').value,
     };
@@ -624,8 +634,102 @@
       });
   }
 
+  function regenerateMarkdown() {
+    const outputDir = document.getElementById('output-dir').value.trim() || _defaultDir || '~/Desktop/chatgpt-export';
+    const markdownOptions = getMarkdownOptions();
+
+    savePrefs({
+      outputDir,
+      concurrency: document.getElementById('concurrency').value,
+      keepAwake: document.getElementById('keep-awake').checked,
+      markdown: markdownOptions,
+    });
+
+    document.getElementById('export-btn').disabled = true;
+    document.getElementById('regenerate-md-btn').disabled = true;
+    document.getElementById('progress-section').classList.remove('hidden');
+    document.getElementById('result').classList.add('hidden');
+    document.getElementById('stats-row').textContent = '';
+    document.getElementById('current-title').textContent = '';
+    document.getElementById('progress-bar').style.width = '0%';
+    document.getElementById('progress-bar').style.background = '#3b82f6';
+    document.getElementById('progress-text').textContent = 'Scanning local JSON files...';
+
+    fetch('/regenerate-markdown', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ outputDir, markdownOptions }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          showResult('error', data.error);
+          resetUI();
+          return;
+        }
+
+        const evtSource = new EventSource('/progress/' + data.exportId);
+        let regenerationDone = false;
+
+        evtSource.addEventListener('status', (e) => {
+          document.getElementById('progress-text').textContent = e.data;
+        });
+
+        evtSource.addEventListener('progress', (e) => {
+          const d = JSON.parse(e.data);
+          const pct = Math.round((d.current / d.total) * 100);
+          document.getElementById('progress-bar').style.width = pct + '%';
+          document.getElementById('progress-text').textContent =
+            'Regenerating ' + d.current + ' of ' + d.total + ' (' + pct + '%)';
+          document.getElementById('current-title').textContent = d.title || '';
+        });
+
+        evtSource.addEventListener('error_msg', (e) => {
+          evtSource.close();
+          showResult('error', e.data);
+          resetUI();
+        });
+
+        evtSource.addEventListener('done', (e) => {
+          regenerationDone = true;
+          evtSource.close();
+          const d = JSON.parse(e.data);
+
+          document.getElementById('progress-bar').style.width = '100%';
+          document.getElementById('progress-bar').style.background = '#22c55e';
+
+          if (d.total === 0) {
+            showResult('error', 'No exported conversation JSON files were found in the selected folder.');
+          } else {
+            let msg = 'Done! ' + d.succeeded + ' of ' + d.total + ' Markdown files regenerated.';
+            if (d.failed > 0) {
+              msg += '<br><br>' + d.failed + ' failed.';
+              if (d.failedTitles?.length) {
+                msg += '<br>' + d.failedTitles.join('<br>');
+              }
+            }
+            showResult(d.failed > 0 ? 'error' : 'success', msg);
+          }
+
+          resetUI();
+        });
+
+        evtSource.onerror = () => {
+          if (regenerationDone) return;
+          evtSource.close();
+          showResult('error', 'Connection lost.');
+          resetUI();
+        };
+      })
+      .catch(err => {
+        showResult('error', 'Failed to start Markdown regeneration: ' + err.message);
+        resetUI();
+      });
+  }
+
   function resetUI() {
-    document.getElementById('export-btn').disabled  = false;
+    document.getElementById('export-btn').disabled = false;
+    document.getElementById('regenerate-md-btn').disabled = false;
     document.getElementById('token-input').disabled = false;
   }
 

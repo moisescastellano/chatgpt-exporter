@@ -1594,6 +1594,169 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
   }
 }
 
+// ── Local Markdown regeneration ──────────────────────────────────────
+
+function buildLocalFileMap(convo, filesDir, fname) {
+  const fileMap = {};
+  const convFilesDir = join(filesDir, fname);
+  if (!existsSync(convFilesDir)) return fileMap;
+
+  let localNames = [];
+  try {
+    localNames = readdirSync(convFilesDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name);
+  } catch {
+    return fileMap;
+  }
+
+  const unused = new Set(localNames);
+  const usedNames = new Set();
+
+  for (const ref of extractFileReferences(convo)) {
+    const expected = deduplicateFilename(
+      sanitizeFilename(ref.filename || ref.fileId),
+      usedNames
+    );
+
+    let actualName = null;
+
+    if (unused.has(expected)) {
+      actualName = expected;
+    } else {
+      const expectedLower = expected.toLowerCase();
+      actualName = [...unused].find((name) => name.toLowerCase() === expectedLower) || null;
+    }
+
+    if (actualName) {
+      fileMap[ref.fileId] = `../files/${fname}/${actualName}`;
+      unused.delete(actualName);
+    }
+  }
+
+  return fileMap;
+}
+
+function collectMarkdownRegenerationTargets(rootDir) {
+  const targets = [];
+
+  const addGroup = (baseDir) => {
+    const jsonDir = join(baseDir, "json");
+    if (!existsSync(jsonDir)) return;
+
+    const mdDir = join(baseDir, "markdown");
+    const filesDir = join(baseDir, "files");
+
+    let names = [];
+    try {
+      names = readdirSync(jsonDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      return;
+    }
+
+    for (const name of names) {
+      const fname = name.slice(0, -5);
+      targets.push({
+        jsonPath: join(jsonDir, name),
+        mdPath: join(mdDir, `${fname}.md`),
+        mdDir,
+        filesDir,
+        fname,
+      });
+    }
+  };
+
+  addGroup(rootDir);
+
+  const projectsDir = join(rootDir, "projects");
+  if (existsSync(projectsDir)) {
+    try {
+      for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
+        if (entry.isDirectory()) addGroup(join(projectsDir, entry.name));
+      }
+    } catch {
+      // Ignore an unreadable projects directory; root conversations can still regenerate.
+    }
+  }
+
+  return targets;
+}
+
+async function regenerateMarkdown(outputDir, markdownOptions, sendEvent) {
+  const rootDir = outputDir.startsWith("~")
+    ? join(homedir(), outputDir.slice(1))
+    : outputDir;
+
+  const options = {
+    messageTimestamps: false,
+    modelName: false,
+    userLabel: "User",
+    assistantLabel: "Assistant",
+    ...(markdownOptions || {}),
+  };
+
+  try {
+    sendEvent("status", "Scanning local conversation JSON files...");
+    const targets = collectMarkdownRegenerationTargets(rootDir);
+
+    if (targets.length === 0) {
+      sendEvent("done", JSON.stringify({
+        total: 0,
+        succeeded: 0,
+        failed: 0,
+        failedTitles: [],
+        output: rootDir,
+      }));
+      return;
+    }
+
+    let succeeded = 0;
+    const failed = [];
+
+    sendEvent("status", `Regenerating ${targets.length} Markdown file(s)...`);
+
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+      let title = target.fname;
+
+      try {
+        const convo = JSON.parse(readFileSync(target.jsonPath, "utf8"));
+        title = convo.title || target.fname;
+        const fileMap = buildLocalFileMap(convo, target.filesDir, target.fname);
+        const markdown = conversationToMarkdown(convo, fileMap, options);
+
+        mkdirSync(target.mdDir, { recursive: true });
+        writeFileSync(target.mdPath, markdown, "utf8");
+        succeeded++;
+      } catch (e) {
+        failed.push(`${title}: ${e.message}`);
+      }
+
+      sendEvent("progress", JSON.stringify({
+        current: i + 1,
+        total: targets.length,
+        title,
+      }));
+
+      // Yield so the SSE progress stream can update during large regenerations.
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    sendEvent("done", JSON.stringify({
+      total: targets.length,
+      succeeded,
+      failed: failed.length,
+      failedTitles: failed,
+      output: rootDir,
+    }));
+  } catch (e) {
+    sendEvent("error_msg", `Markdown regeneration failed: ${e.message}`);
+  }
+}
+
 // ── HTTP server ──────────────────────────────────────────────────────
 
 const exportJobs = new Map(); // exportId → { events: [], done: false }
@@ -1670,6 +1833,55 @@ const server = createServer((req, res) => {
       };
 
       runExport(token, outputDir, concurrency, createZip, keepAwake, exportOptions, sendEvent).finally(() => {
+        const job = exportJobs.get(exportId);
+        if (job) job.done = true;
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ exportId }));
+    });
+
+  // Regenerate Markdown from existing local JSON files (no ChatGPT requests)
+  } else if (req.method === "POST" && req.url === "/regenerate-markdown") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      let outputDir, markdownOptions;
+
+      try {
+        const parsed = JSON.parse(body || "{}");
+        outputDir = parsed.outputDir || join(homedir(), "Desktop", "chatgpt-export");
+        markdownOptions = parsed.markdownOptions || {};
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        return;
+      }
+
+      const exportId = randomUUID().slice(0, 8);
+      exportJobs.set(exportId, { events: [], done: false });
+
+      const sendEvent = (type, data) => {
+        const job = exportJobs.get(exportId);
+        if (job) job.events.push({ type, data: String(data).replace(/\n/g, "\\n") });
+
+        if (type === "progress") {
+          const d = JSON.parse(data);
+          const pct = String(Math.round((d.current / d.total) * 100)).padStart(3);
+          process.stdout.write(`\r[${pct}%] ${d.current}/${d.total}  ${(d.title || "").slice(0, 50).padEnd(50)}`);
+        } else if (type === "status") {
+          process.stdout.write(`\r\x1b[2K${data}\n`);
+        } else if (type === "done") {
+          const d = JSON.parse(data);
+          process.stdout.write(`\r\x1b[2K`);
+          console.log(`\n✓ Markdown regenerated — ${d.succeeded}/${d.total} succeeded · ${d.failed} failed`);
+          console.log(`  Saved to: ${d.output}\n`);
+        } else if (type === "error_msg") {
+          console.error(`\n✗ ${data}\n`);
+        }
+      };
+
+      regenerateMarkdown(outputDir, markdownOptions, sendEvent).finally(() => {
         const job = exportJobs.get(exportId);
         if (job) job.done = true;
       });
