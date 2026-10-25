@@ -13,7 +13,7 @@ const outputArg = args[1];
 if (!inputArg || !outputArg) {
   console.error(
     "Usage: node scripts/render-markdown.js <conversation.json> <output.md> " +
-    "[--conversation-metadata] [--timestamps] [--model-name] " +
+    "[--conversation-metadata] [--timestamps] [--model-name] [--thought-process] " +
     "[--date-format <iso|european>] [--branch <current|all>] " +
     "[--user-label <label>] [--assistant-label <label>]"
   );
@@ -41,6 +41,7 @@ const options = {
   conversationMetadata: args.includes("--conversation-metadata"),
   messageTimestamps: args.includes("--timestamps"),
   modelName: args.includes("--model-name"),
+  thoughtProcess: args.includes("--thought-process"),
   dateFormat,
   branchMode,
   userLabel: getOptionValue("--user-label") || "User",
