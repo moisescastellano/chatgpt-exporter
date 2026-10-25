@@ -278,6 +278,7 @@
           <label class="opt-check"><input type="checkbox" id="md-conversation-metadata"> Conversation metadata</label>
           <label class="opt-check"><input type="checkbox" id="md-timestamps"> Message timestamps</label>
           <label class="opt-check"><input type="checkbox" id="md-model-name"> Model name</label>
+          <label class="opt-check" title="Show visible activity summaries in a quoted Worked block"><input type="checkbox" id="md-thought-process"> Activity summaries (Worked)</label>
         </div>
         <div class="date-row" style="margin-top:10px">
           <div class="date-field">
@@ -521,6 +522,9 @@
     if (markdown.modelName !== undefined) {
       document.getElementById('md-model-name').checked = markdown.modelName;
     }
+    if (markdown.thoughtProcess !== undefined) {
+      document.getElementById('md-thought-process').checked = markdown.thoughtProcess;
+    }
     if (markdown.dateFormat) {
       document.getElementById('md-date-format').value = markdown.dateFormat;
     }
@@ -540,6 +544,7 @@
       conversationMetadata: document.getElementById('md-conversation-metadata').checked,
       messageTimestamps: document.getElementById('md-timestamps').checked,
       modelName: document.getElementById('md-model-name').checked,
+      thoughtProcess: document.getElementById('md-thought-process').checked,
       dateFormat: document.getElementById('md-date-format').value,
       branchMode: document.getElementById('md-branch-mode').value,
       userLabel: document.getElementById('md-user-label').value.trim() || 'User',
