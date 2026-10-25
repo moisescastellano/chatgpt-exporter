@@ -281,6 +281,15 @@
         </div>
         <div class="date-row" style="margin-top:10px">
           <div class="date-field">
+            <label for="md-date-format">Date format</label>
+            <select id="md-date-format" style="background:#1e293b;border:2px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px 10px;font-size:13px;outline:none;width:100%">
+              <option value="iso" selected>ISO — YYYY-MM-DD</option>
+              <option value="european">European — DD/MM/YYYY</option>
+            </select>
+          </div>
+        </div>
+        <div class="date-row" style="margin-top:10px">
+          <div class="date-field">
             <label for="md-user-label">User label</label>
             <input type="text" id="md-user-label" value="User">
           </div>
@@ -505,6 +514,9 @@
     if (markdown.modelName !== undefined) {
       document.getElementById('md-model-name').checked = markdown.modelName;
     }
+    if (markdown.dateFormat) {
+      document.getElementById('md-date-format').value = markdown.dateFormat;
+    }
     if (markdown.userLabel) {
       document.getElementById('md-user-label').value = markdown.userLabel;
     }
@@ -518,6 +530,7 @@
       conversationMetadata: document.getElementById('md-conversation-metadata').checked,
       messageTimestamps: document.getElementById('md-timestamps').checked,
       modelName: document.getElementById('md-model-name').checked,
+      dateFormat: document.getElementById('md-date-format').value,
       userLabel: document.getElementById('md-user-label').value.trim() || 'User',
       assistantLabel: document.getElementById('md-assistant-label').value.trim() || 'Assistant',
     };

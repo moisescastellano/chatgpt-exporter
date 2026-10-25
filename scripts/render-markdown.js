@@ -14,6 +14,7 @@ if (!inputArg || !outputArg) {
   console.error(
     "Usage: node scripts/render-markdown.js <conversation.json> <output.md> " +
     "[--conversation-metadata] [--timestamps] [--model-name] " +
+    "[--date-format <iso|european>] " +
     "[--user-label <label>] [--assistant-label <label>]"
   );
   process.exit(1);
@@ -24,10 +25,17 @@ const getOptionValue = (name) => {
   return index >= 0 ? args[index + 1] : undefined;
 };
 
+const dateFormat = getOptionValue("--date-format") || "iso";
+if (!['iso', 'european'].includes(dateFormat)) {
+  console.error('Invalid --date-format. Use "iso" or "european".');
+  process.exit(1);
+}
+
 const options = {
   conversationMetadata: args.includes("--conversation-metadata"),
   messageTimestamps: args.includes("--timestamps"),
   modelName: args.includes("--model-name"),
+  dateFormat,
   userLabel: getOptionValue("--user-label") || "User",
   assistantLabel: getOptionValue("--assistant-label") || "Assistant",
 };
