@@ -369,28 +369,48 @@ function extractFileReferences(convo) {
   const refs = [];
   const seen = new Set();
   const mapping = convo.mapping || {};
+
   for (const node of Object.values(mapping)) {
     const msg = node.message;
     if (!msg) continue;
+
+    // The Markdown renderer only exposes user/assistant conversation content.
+    // Do not download files attached only to internal tool/system messages.
+    const role = msg.author?.role || "";
+    if (role !== "user" && role !== "assistant") continue;
+
+    // Prefer attachment metadata over image_asset_pointer because it normally
+    // contains the original filename. Skip hidden connector extraction artifacts.
+    if (msg.metadata?.attachments) {
+      for (const att of msg.metadata.attachments) {
+        if (!att.id || seen.has(att.id)) continue;
+        if (att.source === "connector" && att.display_files_from_actions_ext === false) continue;
+
+        seen.add(att.id);
+        refs.push({
+          fileId: att.id,
+          filename: att.name || "attachment",
+          type: "attachment",
+        });
+      }
+    }
+
     if (msg.content?.parts) {
       for (const part of msg.content.parts) {
         if (part?.content_type === "image_asset_pointer" && part.asset_pointer) {
           const match = part.asset_pointer.match(/^(?:file-service|sediment):\/\/(.+)$/);
           if (match && !seen.has(match[1])) {
             seen.add(match[1]);
-            refs.push({ fileId: match[1], filename: part.metadata?.dalle?.prompt ? "dalle_image.png" : "image.png", type: "image" });
+            refs.push({
+              fileId: match[1],
+              filename: part.metadata?.dalle?.prompt ? "dalle_image.png" : "image.png",
+              type: "image",
+            });
           }
         }
       }
     }
-    if (msg.metadata?.attachments) {
-      for (const att of msg.metadata.attachments) {
-        if (att.id && !seen.has(att.id)) {
-          seen.add(att.id);
-          refs.push({ fileId: att.id, filename: att.name || "attachment", type: "attachment" });
-        }
-      }
-    }
+
     if (msg.metadata?.citations) {
       for (const cit of msg.metadata.citations) {
         const fileId = cit.metadata?.file_id || cit.file_id;
@@ -402,10 +422,11 @@ function extractFileReferences(convo) {
       }
     }
   }
+
   return refs;
 }
 
-async function downloadFile(fileId, token, fallbackName, debugLog, gizmoId) {
+async function downloadFile(fileId, token, fallbackName, debugLog, gizmoId, conversationId) {
   // For project files: use download endpoint with gizmo_id query parameter
   if (gizmoId) {
     try {
@@ -427,13 +448,47 @@ async function downloadFile(fileId, token, fallbackName, debugLog, gizmoId) {
     }
   }
 
-  let meta = await apiGet(`files/download/${fileId}`, token);
+  // Conversation uploads/images are resolved through the conversation-aware
+  // download endpoint. The generic endpoint is kept below as a fallback.
+  if (conversationId) {
+    const path =
+      `files/download/${encodeURIComponent(fileId)}` +
+      `?conversation_id=${encodeURIComponent(conversationId)}&inline=false`;
+
+    try {
+      const meta = await apiGet(path, token);
+      if (debugLog) debugLog(`${path}: ${JSON.stringify(meta)}`);
+
+      const url =
+        meta.download_url ||
+        meta.url ||
+        meta.file_url ||
+        meta.presigned_url ||
+        meta.signed_url;
+
+      if (url) {
+        const { buffer, contentType } = await apiFetchBinary(url, token);
+        let filename = meta.file_name || meta.name || fallbackName || fileId;
+        if (!filename.includes(".") && contentType) {
+          const mime = contentType.split(";")[0].trim();
+          const ext = MIME_TO_EXT[mime];
+          if (ext) filename += ext;
+        }
+        return { filename, buffer };
+      }
+    } catch (e) {
+      if (e instanceof RateLimitStopError) throw e;
+      if (debugLog) debugLog(`${path} failed: ${e.message}`);
+    }
+  }
+
+  let meta = await apiGet(`files/download/${encodeURIComponent(fileId)}`, token);
   if (debugLog) debugLog(`files/download/${fileId}: ${JSON.stringify(meta)}`);
   let url = meta.download_url || meta.url || meta.file_url || meta.presigned_url || meta.signed_url;
 
   if (!url) {
     try {
-      const meta2 = await apiGet(`files/${fileId}`, token);
+      const meta2 = await apiGet(`files/${encodeURIComponent(fileId)}`, token);
       if (debugLog) debugLog(`files/${fileId}: ${JSON.stringify(meta2)}`);
       url = meta2.download_url || meta2.url || meta2.file_url || meta2.presigned_url || meta2.signed_url;
       if (url) meta = meta2;
@@ -1452,18 +1507,33 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             const convo   = await apiGet(`conversation/${cid}`, token);
             const jsonStr = JSON.stringify(convo, null, 2);
 
-            // Download attached files
-            const fileRefs  = extractFileReferences(convo);
-            const fileMap   = {};
-            const usedNames = new Set();
+            // Download attached files. Rebuild the conversation file directory
+            // from scratch so stale files from older exports cannot survive.
+            const fileRefs       = extractFileReferences(convo);
+            const fileMap        = {};
+            const fileManifest   = {};
+            const failedManifest = {};
+            const usedNames      = new Set();
+            const convFilesDirFull = join(convFilesDir, fname);
+
+            try {
+              rmSync(convFilesDirFull, { recursive: true, force: true });
+            } catch {}
 
             if (fileRefs.length) {
-              const convFilesDirFull = join(convFilesDir, fname);
               mkdirSync(convFilesDirFull, { recursive: true });
+
               for (const ref of fileRefs) {
                 totalFiles++;
                 try {
-                  const { filename: dlName, buffer } = await downloadFile(ref.fileId, token, ref.filename);
+                  const { filename: dlName, buffer } = await downloadFile(
+                    ref.fileId,
+                    token,
+                    ref.filename,
+                    null,
+                    null,
+                    convo.conversation_id || cid
+                  );
                   const actualName = deduplicateFilename(
                     sanitizeFilename(dlName || ref.filename),
                     usedNames
@@ -1471,13 +1541,32 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                   writeFileSync(join(convFilesDirFull, actualName), buffer);
                   zipFiles.push({ path: `${zipPrefix}files/${fname}/${actualName}`, data: buffer });
                   fileMap[ref.fileId] = `../files/${fname}/${actualName}`;
+                  fileManifest[ref.fileId] = actualName;
                   await sleep(DELAY);
                 } catch (e) {
                   if (e instanceof RateLimitStopError) throw e;
                   failedFiles++;
+                  failedManifest[ref.fileId] = {
+                    filename: ref.filename,
+                    error: e.message,
+                  };
                   failedFileDetails.push(`${ref.filename} (${ref.fileId}): ${e.message}`);
                 }
               }
+
+              const manifestData = {
+                version: 2,
+                files: fileManifest,
+              };
+              if (Object.keys(failedManifest).length) {
+                manifestData.failed = failedManifest;
+              }
+              const manifestStr = JSON.stringify(manifestData, null, 2);
+              writeFileSync(join(convFilesDirFull, ".file-map.json"), manifestStr, "utf8");
+              zipFiles.push({
+                path: `${zipPrefix}files/${fname}/.file-map.json`,
+                data: manifestStr,
+              });
             }
 
             // Write JSON (always — resume key + raw data)
@@ -1596,42 +1685,28 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
 
 // ── Local Markdown regeneration ──────────────────────────────────────
 
-function buildLocalFileMap(convo, filesDir, fname) {
+function buildLocalFileMap(filesDir, fname) {
   const fileMap = {};
   const convFilesDir = join(filesDir, fname);
-  if (!existsSync(convFilesDir)) return fileMap;
+  const manifestPath = join(convFilesDir, ".file-map.json");
 
-  let localNames = [];
+  if (!existsSync(manifestPath)) return fileMap;
+
   try {
-    localNames = readdirSync(convFilesDir, { withFileTypes: true })
-      .filter((entry) => entry.isFile())
-      .map((entry) => entry.name);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const files = manifest?.files;
+    if (!files || typeof files !== "object") return fileMap;
+
+    for (const [fileId, actualName] of Object.entries(files)) {
+      if (!fileId || typeof actualName !== "string") continue;
+      if (basename(actualName) !== actualName) continue;
+      if (!existsSync(join(convFilesDir, actualName))) continue;
+
+      fileMap[fileId] = `../files/${fname}/${actualName}`;
+    }
   } catch {
-    return fileMap;
-  }
-
-  const unused = new Set(localNames);
-  const usedNames = new Set();
-
-  for (const ref of extractFileReferences(convo)) {
-    const expected = deduplicateFilename(
-      sanitizeFilename(ref.filename || ref.fileId),
-      usedNames
-    );
-
-    let actualName = null;
-
-    if (unused.has(expected)) {
-      actualName = expected;
-    } else {
-      const expectedLower = expected.toLowerCase();
-      actualName = [...unused].find((name) => name.toLowerCase() === expectedLower) || null;
-    }
-
-    if (actualName) {
-      fileMap[ref.fileId] = `../files/${fname}/${actualName}`;
-      unused.delete(actualName);
-    }
+    // Missing/corrupt manifests simply mean that attachments are rendered
+    // by name without a local link. Never guess file identity by filename.
   }
 
   return fileMap;
@@ -1725,7 +1800,7 @@ async function regenerateMarkdown(outputDir, markdownOptions, sendEvent) {
       try {
         const convo = JSON.parse(readFileSync(target.jsonPath, "utf8"));
         title = convo.title || target.fname;
-        const fileMap = buildLocalFileMap(convo, target.filesDir, target.fname);
+        const fileMap = buildLocalFileMap(target.filesDir, target.fname);
         const markdown = conversationToMarkdown(convo, fileMap, options);
 
         mkdirSync(target.mdDir, { recursive: true });
