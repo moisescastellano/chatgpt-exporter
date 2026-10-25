@@ -287,6 +287,13 @@
               <option value="european">European — DD/MM/YYYY</option>
             </select>
           </div>
+          <div class="date-field">
+            <label for="md-branch-mode">Conversation branch</label>
+            <select id="md-branch-mode" style="background:#1e293b;border:2px solid #334155;border-radius:8px;color:#e2e8f0;padding:8px 10px;font-size:13px;outline:none;width:100%">
+              <option value="current" selected>Current branch</option>
+              <option value="all">All branches</option>
+            </select>
+          </div>
         </div>
         <div class="date-row" style="margin-top:10px">
           <div class="date-field">
@@ -517,6 +524,9 @@
     if (markdown.dateFormat) {
       document.getElementById('md-date-format').value = markdown.dateFormat;
     }
+    if (markdown.branchMode) {
+      document.getElementById('md-branch-mode').value = markdown.branchMode;
+    }
     if (markdown.userLabel) {
       document.getElementById('md-user-label').value = markdown.userLabel;
     }
@@ -531,6 +541,7 @@
       messageTimestamps: document.getElementById('md-timestamps').checked,
       modelName: document.getElementById('md-model-name').checked,
       dateFormat: document.getElementById('md-date-format').value,
+      branchMode: document.getElementById('md-branch-mode').value,
       userLabel: document.getElementById('md-user-label').value.trim() || 'User',
       assistantLabel: document.getElementById('md-assistant-label').value.trim() || 'Assistant',
     };

@@ -14,7 +14,7 @@ if (!inputArg || !outputArg) {
   console.error(
     "Usage: node scripts/render-markdown.js <conversation.json> <output.md> " +
     "[--conversation-metadata] [--timestamps] [--model-name] " +
-    "[--date-format <iso|european>] " +
+    "[--date-format <iso|european>] [--branch <current|all>] " +
     "[--user-label <label>] [--assistant-label <label>]"
   );
   process.exit(1);
@@ -31,11 +31,18 @@ if (!['iso', 'european'].includes(dateFormat)) {
   process.exit(1);
 }
 
+const branchMode = getOptionValue("--branch") || "current";
+if (!["current", "all"].includes(branchMode)) {
+  console.error('Invalid --branch. Use "current" or "all".');
+  process.exit(1);
+}
+
 const options = {
   conversationMetadata: args.includes("--conversation-metadata"),
   messageTimestamps: args.includes("--timestamps"),
   modelName: args.includes("--model-name"),
   dateFormat,
+  branchMode,
   userLabel: getOptionValue("--user-label") || "User",
   assistantLabel: getOptionValue("--assistant-label") || "Assistant",
 };
