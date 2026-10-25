@@ -275,6 +275,7 @@
       <div class="options-group">
         <div class="options-group-label">Markdown options</div>
         <div class="opt-checks">
+          <label class="opt-check"><input type="checkbox" id="md-conversation-metadata"> Conversation metadata</label>
           <label class="opt-check"><input type="checkbox" id="md-timestamps"> Message timestamps</label>
           <label class="opt-check"><input type="checkbox" id="md-model-name"> Model name</label>
         </div>
@@ -495,6 +496,9 @@
     if (saved.keepAwake !== undefined) document.getElementById('keep-awake').checked = saved.keepAwake;
 
     const markdown = saved.markdown || {};
+    if (markdown.conversationMetadata !== undefined) {
+      document.getElementById('md-conversation-metadata').checked = markdown.conversationMetadata;
+    }
     if (markdown.messageTimestamps !== undefined) {
       document.getElementById('md-timestamps').checked = markdown.messageTimestamps;
     }
@@ -511,6 +515,7 @@
 
   function getMarkdownOptions() {
     return {
+      conversationMetadata: document.getElementById('md-conversation-metadata').checked,
       messageTimestamps: document.getElementById('md-timestamps').checked,
       modelName: document.getElementById('md-model-name').checked,
       userLabel: document.getElementById('md-user-label').value.trim() || 'User',

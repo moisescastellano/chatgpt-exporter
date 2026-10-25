@@ -13,7 +13,7 @@ const outputArg = args[1];
 if (!inputArg || !outputArg) {
   console.error(
     "Usage: node scripts/render-markdown.js <conversation.json> <output.md> " +
-    "[--timestamps] [--model-name] " +
+    "[--conversation-metadata] [--timestamps] [--model-name] " +
     "[--user-label <label>] [--assistant-label <label>]"
   );
   process.exit(1);
@@ -25,6 +25,7 @@ const getOptionValue = (name) => {
 };
 
 const options = {
+  conversationMetadata: args.includes("--conversation-metadata"),
   messageTimestamps: args.includes("--timestamps"),
   modelName: args.includes("--model-name"),
   userLabel: getOptionValue("--user-label") || "User",
