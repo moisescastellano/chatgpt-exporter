@@ -11,6 +11,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const server = readFileSync(join(root, "server.js"), "utf8");
+const runner = readFileSync(join(root, "lib", "export-runner.js"), "utf8");
 const ui = readFileSync(join(root, "public", "index.html"), "utf8");
 
 let checks = 0;
@@ -39,11 +40,11 @@ check(!conversationMatchesProjectSelection({ id: "a", projectId: "g-p-a" }, sele
 check(conversationMatchesProjectSelection({ id: "a", projectId: "g-p-a" }, null), "null selection keeps every Project conversation");
 
 check(server.includes('req.url === "/list-projects"'), "server exposes lightweight Project inventory endpoint");
-check(server.includes("allProjects = await fetchProjectsInventory"), "export still fetches the full Project inventory");
-check(server.includes("filterSelectedProjects(allProjects, exportOptions?.selectedProjectIds)"), "Project metadata/resources use selected Projects");
-check(server.includes("conversationMatchesProjectSelection(conversation, selectedProjectIds)"), "conversation work queue respects Project selection");
-check(server.includes("projectConvIdMap"), "conversation inventory keeps stable Project IDs for filtering");
-check(server.includes("deletionReconciliationComplete ="), "deleted reconciliation remains present");
+check(runner.includes("allProjects = await fetchProjectsInventory"), "export still fetches the full Project inventory");
+check(runner.includes("filterSelectedProjects(allProjects, exportOptions?.selectedProjectIds)"), "Project metadata/resources use selected Projects");
+check(runner.includes("conversationMatchesProjectSelection(conversation, selectedProjectIds)"), "conversation work queue respects Project selection");
+check(runner.includes("projectConvIdMap"), "conversation inventory keeps stable Project IDs for filtering");
+check(runner.includes("deletionReconciliationComplete ="), "deleted reconciliation remains present");
 
 check(ui.includes('id="project-choose-btn"'), "UI exposes compact Choose button");
 check(ui.includes('id="project-overlay"'), "UI provides Project selection modal");

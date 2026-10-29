@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const server = readFileSync(join(root, "server.js"), "utf8");
+const api = readFileSync(join(root, "lib", "chatgpt-api.js"), "utf8");
+const runner = readFileSync(join(root, "lib", "export-runner.js"), "utf8");
 const ui = readFileSync(join(root, "public", "index.html"), "utf8");
 
 let checks = 0;
@@ -14,10 +16,10 @@ const check = (condition, message) => {
   checks++;
 };
 
-check(server.includes("let rateLimitRetryAfter = null;"), "server stores Retry-After from the first 429");
-check(server.includes("rateLimitRetryAfter = retryAfter || null;"), "server captures Retry-After header");
-check(server.includes('sendEvent("rate_limited", JSON.stringify({'), "early 429 is emitted as a dedicated event");
-check(server.includes("rateLimitRetryAfter,"), "normal completion payload includes Retry-After information");
+check(api.includes("let rateLimitRetryAfter = null;"), "server stores Retry-After from the first 429");
+check(api.includes("rateLimitRetryAfter = retryAfter || null;"), "server captures Retry-After header");
+check(runner.includes('sendEvent("rate_limited", JSON.stringify({'), "early 429 is emitted as a dedicated event");
+check(runner.includes("rateLimitRetryAfter: getRateLimitState().retryAfter,"), "normal completion payload includes Retry-After information");
 check(server.includes("`${d.processed}/${d.total} conversations processed · ${d.remaining} remaining`"), "terminal output reports partial progress on 429");
 
 check(ui.includes(".result.warning"), "UI defines a warning state distinct from success/error");

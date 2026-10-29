@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-full-exporter",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Export all your ChatGPT conversations, projects & GPTs as JSON, Markdown and HTML",
   "type": "module",
   "bin": {
