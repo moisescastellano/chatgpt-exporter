@@ -21,7 +21,8 @@
   ],
   "scripts": {
     "start": "node server.js",
-    "build": "npx esbuild server.js --bundle --platform=node --format=cjs --outfile=bundle.cjs && npx @yao-pkg/pkg bundle.cjs --targets node18-win-x64 --output dist/chatgpt-exporter-win.exe && node -e \"const{cpSync}=require('fs');cpSync('public','dist/public',{recursive:true})\""
+    "build": "npx esbuild server.js --bundle --platform=node --format=cjs --outfile=bundle.cjs && npx @yao-pkg/pkg bundle.cjs --targets node18-win-x64 --output dist/chatgpt-exporter-win.exe && node -e \"const{cpSync}=require('fs');cpSync('public','dist/public',{recursive:true})\"",
+    "test": "node tests/run-all.mjs"
   },
   "keywords": [
     "chatgpt",
@@ -51,8 +52,12 @@
   },
   "pkg": {
     "scripts": "bundle.cjs",
-    "assets": ["public/**/*"],
-    "targets": ["node18-win-x64"],
+    "assets": [
+      "public/**/*"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
     "outputPath": "dist"
   }
 }
