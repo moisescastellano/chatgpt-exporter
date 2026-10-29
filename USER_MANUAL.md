@@ -252,16 +252,23 @@ The date filter in the UI uses `create_time`.
 
 ## 8. Rate limiting
 
-Requests sent to ChatGPT are paced to reduce the risk of hitting usage limits.
+Requests sent to ChatGPT are paced to reduce the risk of hitting usage limits. The current limiter starts ChatGPT API requests no faster than approximately one per second.
 
 If ChatGPT responds with HTTP `429`:
 
 - the exporter stops making new ChatGPT requests;
 - it does not enter an automatic retry loop;
+- the UI reports the export as **paused**, not successfully completed;
+- processed and remaining conversation counts are shown when available;
+- `Retry-After` is displayed when ChatGPT provides it;
 - all data already saved remains on disk;
 - a later run can continue through Smart Resume.
 
 Downloads from external signed URLs are not treated as normal ChatGPT API requests.
+
+The exact internal ChatGPT rate-limit policy is not documented by OpenAI. A community investigation in another exporter project suggests a token-bucket model with an initial capacity around 200–250 requests and a refill around one request per minute. Those numbers are empirical, may vary, and the source itself says they still need re-verification.
+
+See [RATE_LIMITING.md](RATE_LIMITING.md) for the model, rationale behind the exporter's stop-on-first-429 behavior, and the external source.
 
 ---
 
@@ -555,6 +562,14 @@ files/
 
 Active Project conversations are stored inside the Project.
 
+### Selecting specific Projects
+
+Projects default to **all Projects**.
+
+Use **Choose...** next to the Projects option to load the Project list and select only the Projects you want to export. The dialog supports selecting all Projects, clearing the selection, or choosing individual Projects.
+
+The selection controls which Projects have their metadata, resources, and full conversations exported. It does **not** redefine the remote inventory: the exporter still accounts for all Projects when required for active/archived/deleted reconciliation. Therefore, leaving a Project unchecked does not cause its existing local conversations to be treated as deleted.
+
 If a conversation becomes archived or deleted, that state is represented through the global `archived/` or `deleted/` areas.
 
 ---
@@ -669,7 +684,7 @@ Smart Resume reuses what has already been saved.
 
 There is no need to start over.
 
-If the interruption was caused by HTTP `429`, wait before starting another export.
+If the interruption was caused by HTTP `429`, the UI reports the run as paused. Wait before starting another export, reuse the same output directory, and let Smart Resume continue from the data already saved. If ChatGPT supplied a `Retry-After` value, the UI displays it.
 
 ---
 
@@ -697,6 +712,7 @@ If a specific file failed, also inspect the relevant `.file-map.json`.
 - Not every internal message type necessarily has a useful Markdown representation.
 - ChatGPT's internal data structures may change over time.
 - Reaching an API rate limit can interrupt an export run.
+- The token-bucket figures discussed in `RATE_LIMITING.md` are community observations, not an official OpenAI contract.
 - This tool does not replace OpenAI's official data export mechanism.
 
 ---

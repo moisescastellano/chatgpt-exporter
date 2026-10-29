@@ -37,7 +37,10 @@ These features have been added in this fork and may not be available in the upst
 - **Smart Resume** — conversations are classified as new, updated, resumed, or failed. Existing JSON is reused when possible, while conversations changed since the previous export are downloaded again.
 - **Safer file downloads** — the ChatGPT bearer token is only sent to ChatGPT hosts, never to external signed download URLs.
 - **Windows-safe filenames** — exported conversation and file names are sanitized for Windows-compatible paths.
-- **Conservative rate limiting** — ChatGPT requests are paced, and the export stops immediately on the first ChatGPT HTTP `429` instead of continuing to generate more rate-limited requests.
+- **Conservative rate limiting** — ChatGPT requests are paced, and the export stops immediately on the first ChatGPT HTTP `429` instead of continuing to generate more rate-limited requests. The UI reports the export as paused, preserves progress, and shows `Retry-After` when ChatGPT provides it.
+- **Selective Project export** — optionally choose specific Projects to export while the exporter still inventories all Projects for safe archived/deleted reconciliation.
+- **Archived/deleted conversation tracking** — archived conversations are kept under `archived/`; locally exported conversations that disappear from a complete remote inventory are moved to `deleted/` instead of being erased.
+- **ChatGPT-generated file export** — `sandbox:/...` links are resolved when possible, downloaded alongside conversation files, and mapped through `.file-map.json`.
 - **Regenerate Markdown** — rebuild Markdown from the already exported local JSON without a session token and without making ChatGPT requests.
 - **Offline Markdown renderer** — `scripts/render-markdown.js` uses the same Markdown converter as the web UI.
 - **Conversation metadata in Markdown** — optional created, updated, exported, and conversation-link fields.
@@ -57,6 +60,8 @@ The raw conversation JSON remains the canonical local copy. Markdown can therefo
 
 See the [User Manual](USER_MANUAL.md) for detailed usage, Smart Resume behavior, Markdown options, archived/deleted conversations, attachments, and ChatGPT-generated `sandbox:/...` files.
 
+See [Rate limiting notes](RATE_LIMITING.md) for the exporter strategy, the community-observed token-bucket model, and the distinction between confirmed behavior and empirical assumptions.
+
 ## Output structure
 
 ```text
@@ -75,7 +80,18 @@ chatgpt-export/
 │       ├── resources/    ← uploaded project files (PDFs, images, etc.)
 │       ├── json/
 │       ├── markdown/
-│       └── html/
+│       ├── html/
+│       └── files/
+├── archived/
+│   ├── json/
+│   ├── markdown/
+│   ├── html/
+│   └── files/
+├── deleted/
+│   ├── json/
+│   ├── markdown/
+│   ├── html/
+│   └── files/
 ├── gpts/             ← your custom GPTs as Markdown
 └── logs/             ← export run logs
 ```
@@ -139,13 +155,21 @@ Click **Export options** to expand the main export settings:
 
 | Option | Description |
 |--------|-------------|
-| Conversations / Projects / GPTs | Toggle which categories to export |
+| Conversations / Projects / GPTs | Toggle which categories to export. Projects can also be narrowed with **Choose...** |
 | JSON / Markdown / HTML | Toggle output formats |
 | From / Until | Filter conversations by creation date (leave empty = export all) |
 | Keep computer awake | Prevent sleep during long exports |
 | Create ZIP archive | Bundle output into a `.zip` file |
 
 > **Note:** JSON is always written to disk because it is the canonical local representation used by Smart Resume and Markdown regeneration. It is only included in the ZIP when the JSON format is enabled.
+
+### Selecting specific Projects
+
+Projects default to **all Projects**, preserving the original one-click behavior.
+
+Use **Choose...** next to Projects to load the lightweight Project inventory and select only the Projects you want to export. The selector supports **Select all**, **Clear all**, and individual checkboxes.
+
+This selection limits Project metadata, resources, and full conversation downloads. The exporter still inventories all Projects internally when needed so that unselected Projects are never mistaken for deleted conversations.
 
 ### Markdown options in this fork
 
@@ -231,11 +255,13 @@ http://127.0.0.1:8523/debug-log
 
 ### HTTP 429 / rate limiting
 
-This fork deliberately stops ChatGPT API activity when the first ChatGPT HTTP `429` is received. This avoids repeatedly retrying against an already rate-limited account.
+This fork deliberately stops ChatGPT API activity when the first ChatGPT HTTP `429` is received. The UI reports the run as **paused**, keeps the data already written to disk, shows processed/remaining counts when available, and displays `Retry-After` when ChatGPT returns that header.
 
-Wait until ChatGPT requests are available again and start another export. Smart Resume will reuse conversations already saved locally and continue with the remaining work.
+Start another export later using the same output directory. Smart Resume will reuse conversations already saved locally and continue with the remaining work.
 
 A `429` from an external signed file-download host does not by itself stop all ChatGPT requests.
+
+The exact ChatGPT internal limit is undocumented. A community investigation in another exporter project suggests a token-bucket model with an initial capacity of roughly 200–250 requests and a refill around one request per minute, but those figures are empirical and explicitly require re-verification. See [Rate limiting notes](RATE_LIMITING.md) for details and source links.
 
 ### Old or unavailable attachments
 
@@ -246,6 +272,18 @@ In that case:
 - the Markdown still shows `[Attachment: original-name.ext]`;
 - `.file-map.json` records the failed download;
 - no guessed or potentially incorrect local link is generated.
+
+## Development and tests
+
+The fork keeps its automated regression suite under `tests/`.
+
+Run all tests with:
+
+```bash
+npm test
+```
+
+The server has been split into focused modules under `lib/`; `server.js` is now primarily the application entrypoint and HTTP wiring.
 
 ## How it works
 
