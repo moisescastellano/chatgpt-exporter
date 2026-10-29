@@ -640,18 +640,25 @@
           document.getElementById('progress-bar').style.width     = '100%';
           document.getElementById('progress-bar').style.background = '#22c55e';
 
+          let msg;
           if (d.total === 0) {
-            showResult('success', 'No conversations found in your account.');
+            msg = 'No active or archived conversations found in your account.';
           } else {
-            let msg = 'Done! ' + d.succeeded + ' new · ' + (d.updated || 0) + ' updated · ' + d.skipped + ' resumed · ' +  d.failed + ' failed';
-            if (d.totalFiles > 0) msg += '<br>' + (d.totalFiles - d.failedFiles) + ' of ' + d.totalFiles + ' files downloaded.';
-            if (d.projects   > 0) msg += '<br>' + d.projects + ' project(s) exported.';
-            if (d.gpts       > 0) msg += '<br>' + d.gpts + ' GPT(s) exported to <code>gpts/</code>';
-            msg += '<br><br>Saved to:<br><code>' + d.output + '</code>';
-            if (d.failedTitles && d.failedTitles.length)
-              msg += '<br><br>' + d.failed + ' conversations failed: ' + d.failedTitles.join(', ');
-            showResult('success', msg);
+            msg = 'Done! ' + d.succeeded + ' new · ' + (d.updated || 0) + ' updated · ' + d.skipped + ' resumed · ' +  d.failed + ' failed';
           }
+          if (d.archived > 0) msg += '<br>' + d.archived + ' archived conversation(s) stored under <code>archived/</code>.';
+          if (d.movedToArchived > 0) msg += '<br>' + d.movedToArchived + ' conversation(s) moved to <code>archived/</code>.';
+          if (d.restoredFromArchived > 0) msg += '<br>' + d.restoredFromArchived + ' conversation(s) restored from <code>archived/</code>.';
+          if (d.restoredFromDeleted > 0) msg += '<br>' + d.restoredFromDeleted + ' conversation(s) restored from <code>deleted/</code>.';
+          if (d.movedToDeleted > 0) msg += '<br>' + d.movedToDeleted + ' conversation(s) no longer found in ChatGPT and moved to <code>deleted/</code>.';
+          if (exportOptions.conversations && d.deletionReconciliationComplete === false) msg += '<br>Deleted-conversation reconciliation was skipped because a complete inventory was not available.';
+          if (d.totalFiles > 0) msg += '<br>' + (d.totalFiles - d.failedFiles) + ' of ' + d.totalFiles + ' files downloaded.';
+          if (d.projects   > 0) msg += '<br>' + d.projects + ' project(s) exported.';
+          if (d.gpts       > 0) msg += '<br>' + d.gpts + ' GPT(s) exported to <code>gpts/</code>';
+          msg += '<br><br>Saved to:<br><code>' + d.output + '</code>';
+          if (d.failedTitles && d.failedTitles.length)
+            msg += '<br><br>' + d.failed + ' conversations failed: ' + d.failedTitles.join(', ');
+          showResult('success', msg);
           resetUI();
         });
 

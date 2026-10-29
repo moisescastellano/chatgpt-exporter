@@ -21,6 +21,10 @@ import { execSync, spawn }                    from "node:child_process";
 import { fileURLToPath }                      from "node:url";
 import { conversationToMarkdown }             from "./lib/markdown.js";
 import { extractSandboxReferences, rewriteSandboxLinks } from "./lib/sandbox-files.js";
+import {
+  buildLocalConversationIndex,
+  moveConversationArtifacts,
+} from "./lib/conversation-storage.js";
 
 const __dirname = (() => {
   try { return dirname(fileURLToPath(import.meta.url)); }
@@ -890,20 +894,20 @@ function extractHtmlTitle(htmlPath) {
 }
 
 function generateExportIndex(rootDir, allProjects) {
-  const htmlDir    = join(rootDir, "html");
-  const rootConvos = existsSync(htmlDir)
+  const listHtmlConversations = (htmlDir) => existsSync(htmlDir)
     ? readdirSync(htmlDir).filter((f) => f.endsWith(".html")).sort().reverse()
         .map((f) => ({ fname: f, title: extractHtmlTitle(join(htmlDir, f)) }))
     : [];
+
+  const rootConvos     = listHtmlConversations(join(rootDir, "html"));
+  const archivedConvos = listHtmlConversations(join(rootDir, "archived", "html"));
+  const deletedConvos  = listHtmlConversations(join(rootDir, "deleted", "html"));
 
   const projects = (allProjects || []).map((proj) => {
     const safe        = sanitizeFilename(proj.name);
     const projDir     = join(rootDir, "projects", safe);
     const projHtmlDir = join(projDir, "html");
-    const convos      = existsSync(projHtmlDir)
-      ? readdirSync(projHtmlDir).filter((f) => f.endsWith(".html")).sort().reverse()
-          .map((f) => ({ fname: f, title: extractHtmlTitle(join(projHtmlDir, f)) }))
-      : [];
+    const convos      = listHtmlConversations(projHtmlDir);
     const resDir    = join(projDir, "resources");
     const resources = existsSync(resDir)
       ? readdirSync(resDir).filter((f) => !f.startsWith(".")).sort()
@@ -912,10 +916,14 @@ function generateExportIndex(rootDir, allProjects) {
     return { name: proj.name, safe, convos, resources, hasInfo };
   });
 
-  writeFileSync(join(rootDir, "index.html"), buildExportIndexHtml(rootConvos, projects), "utf8");
+  writeFileSync(
+    join(rootDir, "index.html"),
+    buildExportIndexHtml(rootConvos, projects, archivedConvos, deletedConvos),
+    "utf8"
+  );
 }
 
-function buildExportIndexHtml(rootConvos, projects) {
+function buildExportIndexHtml(rootConvos, projects, archivedConvos = [], deletedConvos = []) {
   const LOGO = `<svg viewBox="0 0 41 41" fill="none" xmlns="http://www.w3.org/2000/svg" width="20" height="20"><path d="M37.532 16.87a9.963 9.963 0 0 0-.856-8.184 10.078 10.078 0 0 0-10.855-4.835A9.964 9.964 0 0 0 18.306.5a10.079 10.079 0 0 0-9.614 6.977 9.967 9.967 0 0 0-6.664 4.834 10.08 10.08 0 0 0 1.24 11.817 9.965 9.965 0 0 0 .856 8.185 10.079 10.079 0 0 0 10.855 4.835 9.965 9.965 0 0 0 7.516 3.35 10.078 10.078 0 0 0 9.617-6.981 9.967 9.967 0 0 0 6.663-4.834 10.079 10.079 0 0 0-1.243-11.813ZM22.498 37.886a7.474 7.474 0 0 1-4.799-1.735c.061-.033.168-.091.237-.134l7.964-4.6a1.294 1.294 0 0 0 .655-1.134V19.054l3.366 1.944a.12.12 0 0 1 .066.092v9.299a7.505 7.505 0 0 1-7.49 7.496ZM6.392 31.006a7.471 7.471 0 0 1-.894-5.023c.06.036.162.099.237.141l7.964 4.6a1.297 1.297 0 0 0 1.308 0l9.724-5.614v3.888a.12.12 0 0 1-.048.103l-8.051 4.649a7.504 7.504 0 0 1-10.24-2.744ZM4.297 13.62A7.469 7.469 0 0 1 8.2 10.333c0 .068-.004.19-.004.274v9.201a1.294 1.294 0 0 0 .654 1.132l9.723 5.614-3.366 1.944a.12.12 0 0 1-.114.012L7.044 23.86a7.504 7.504 0 0 1-2.747-10.24Zm27.658 6.437-9.724-5.615 3.367-1.943a.121.121 0 0 1 .114-.012l8.048 4.648a7.498 7.498 0 0 1-1.158 13.528V21.36a1.293 1.293 0 0 0-.647-1.132v-.17Zm3.35-5.043c-.059-.037-.162-.099-.236-.141l-7.965-4.6a1.298 1.298 0 0 0-1.308 0l-9.723 5.614v-3.888a.12.12 0 0 1 .048-.103l8.05-4.645a7.497 7.497 0 0 1 11.135 7.763Zm-21.063 6.929-3.367-1.944a.12.12 0 0 1-.065-.092v-9.299a7.497 7.497 0 0 1 12.293-5.756 6.94 6.94 0 0 0-.236.134l-7.965 4.6a1.294 1.294 0 0 0-.654 1.132l-.006 11.225Zm1.829-3.943 4.33-2.501 4.332 2.5v5l-4.331 2.5-4.331-2.5V18Z" fill="currentColor"/></svg>`;
 
   const projectsHtml = projects.length ? `
@@ -942,6 +950,18 @@ function buildExportIndexHtml(rootConvos, projects) {
     <div class="nav-section">
       <div class="nav-section-hdr">Recent chats</div>
       ${rootConvos.map((c) => `<a class="nav-item" href="html/${encodeURIComponent(c.fname)}" onclick="loadFrame(this,event)">${escapeHtml(c.title)}</a>`).join("\n      ")}
+    </div>` : "";
+
+  const archivedHtml = archivedConvos.length ? `
+    <div class="nav-section">
+      <div class="nav-section-hdr">Archived</div>
+      ${archivedConvos.map((c) => `<a class="nav-item" href="archived/html/${encodeURIComponent(c.fname)}" onclick="loadFrame(this,event)">${escapeHtml(c.title)}</a>`).join("\n      ")}
+    </div>` : "";
+
+  const deletedHtml = deletedConvos.length ? `
+    <div class="nav-section">
+      <div class="nav-section-hdr">Deleted</div>
+      ${deletedConvos.map((c) => `<a class="nav-item" href="deleted/html/${encodeURIComponent(c.fname)}" onclick="loadFrame(this,event)">${escapeHtml(c.title)}</a>`).join("\n      ")}
     </div>` : "";
 
   return `<!DOCTYPE html>
@@ -986,8 +1006,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
   <div class="sidebar-top">${LOGO}<span class="sidebar-title">ChatGPT Export</span></div>
   <div class="search-box"><input id="search" type="text" placeholder="Search conversations..." oninput="filterNav(this.value)"></div>
   <div class="sidebar-scroll" id="sidebar-scroll">
-    ${projectsHtml}
     ${convosHtml}
+    ${projectsHtml}
+    ${archivedHtml}
+    ${deletedHtml}
   </div>
 </nav>
 <div id="placeholder" class="placeholder">
@@ -1189,7 +1211,9 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
 
     // ── Fetch projects ────────────────────────────────────────────────
     const allProjects = [];
+    let projectsInventoryComplete = !doProjs;
     if (doProjs) {
+      projectsInventoryComplete = true;
       try {
         sendEvent("status", "Fetching projects...");
         let cursor = null;
@@ -1219,6 +1243,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
         }
       } catch (e) {
         if (e instanceof RateLimitStopError) throw e;
+        projectsInventoryComplete = false;
         log(`Projects fetch skipped: ${e.message}`);
       }
     }
@@ -1228,6 +1253,8 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     // in a single pass (O(1) map lookup instead of O(n) find).
     const projectConvMap   = new Map(); // convId → projectName
     const projectConvExtra = [];        // convs only in project lists, not in main endpoint
+    let projectConversationsInventoryComplete = !(doProjs && doConvs);
+    if (doProjs && doConvs) projectConversationsInventoryComplete = projectsInventoryComplete;
     if (doProjs && doConvs && allProjects.length) {
       const seen = new Set();
       for (const proj of allProjects) {
@@ -1249,6 +1276,8 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             await sleep(DELAY);
           } catch (e) {
             if (e instanceof RateLimitStopError) throw e;
+            projectConversationsInventoryComplete = false;
+            log(`Project conversation inventory failed for "${projName}": ${e.message}`);
             break;
           }
         }
@@ -1317,33 +1346,145 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     let totalFiles        = 0;
     let failedFiles       = 0;
     const failedFileDetails = [];
+    let archivedCount       = 0;
+    let movedToArchived      = 0;
+    let restoredFromArchived = 0;
+    let restoredFromDeleted  = 0;
+    let movedToDeleted       = 0;
+    let deletionReconciliationComplete = false;
 
     if (doConvs) {
-      // ── Fetch all conversations ────────────────────────────────────
-      sendEvent("status", "Fetching conversation list...");
-      let allConversations = [];
+      // ── Fetch active + archived conversation inventories ───────────
+      const fetchConversationInventory = async (isArchived) => {
+        const label = isArchived ? "archived conversations" : "active conversations";
+        const conversations = [];
+        let offset = 0;
 
-      let offset = 0;
-      while (true) {
-        const data  = await apiGet(`conversations?offset=${offset}&limit=${PAGE_SIZE}`, token);
-        const items = data.items || [];
-        if (!items.length) break;
-        // Assign projectName in one pass using the pre-built map
-        allConversations.push(...items.map((c) => ({ ...c, projectName: projectConvMap.get(c.id) || null })));
-        const fetchTotal = data.total || 0;
-        sendEvent("status", `Fetching conversation list... ${allConversations.length}/${fetchTotal}`);
-        offset += PAGE_SIZE;
-        if (offset >= fetchTotal) break;
-        await sleep(DELAY);
-      }
+        while (true) {
+          const params = new URLSearchParams({
+            offset: String(offset),
+            limit: String(PAGE_SIZE),
+            order: "updated",
+            is_archived: String(isArchived),
+          });
 
-      // Add any project conversations not present in the main endpoint
-      if (projectConvExtra.length) {
-        const mainIds = new Set(allConversations.map((c) => c.id));
-        for (const c of projectConvExtra) {
-          if (!mainIds.has(c.id)) allConversations.push(c);
+          const data = await apiGet(`conversations?${params.toString()}`, token);
+          const items = data.items || data.conversations || [];
+          const fetchTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : null;
+
+          if (!items.length) {
+            if (fetchTotal !== null && offset < fetchTotal) {
+              throw new Error(`Inventory for ${label} ended early at ${offset}/${fetchTotal}`);
+            }
+            break;
+          }
+
+          conversations.push(...items.map((c) => ({
+            ...c,
+            isArchived,
+            projectName: projectConvMap.get(c.id) || null,
+          })));
+
+          sendEvent(
+            "status",
+            `Fetching ${label}... ${conversations.length}${fetchTotal !== null ? "/" + fetchTotal : ""}`
+          );
+
+          offset += items.length;
+          if (fetchTotal !== null && offset >= fetchTotal) break;
+          if (fetchTotal === null && items.length < PAGE_SIZE) break;
+          await sleep(DELAY);
         }
+
+        return conversations;
+      };
+
+      sendEvent("status", "Fetching active conversations...");
+      const activeConversations = await fetchConversationInventory(false);
+      sendEvent("status", "Fetching archived conversations...");
+      const archivedConversations = await fetchConversationInventory(true);
+
+      // Keep the two inventories distinct. They are combined only into a work
+      // queue after every row has been tagged with its storage state.
+      const inventoryById = new Map();
+      for (const c of activeConversations) inventoryById.set(c.id, c);
+      for (const c of archivedConversations) inventoryById.set(c.id, c);
+
+      // Project-only rows can be absent from the main endpoint. Preserve their
+      // project identity and any is_archived flag supplied by that endpoint.
+      for (const c of projectConvExtra) {
+        if (inventoryById.has(c.id)) continue;
+        inventoryById.set(c.id, {
+          ...c,
+          isArchived: c.is_archived === true,
+          projectName: c.projectName || projectConvMap.get(c.id) || null,
+        });
       }
+
+      archivedCount = [...inventoryById.values()].filter((c) => c.isArchived === true).length;
+      const activeCount = inventoryById.size - archivedCount;
+      sendEvent("status", `Inventory complete: ${activeCount} active · ${archivedCount} archived.`);
+
+      // Reconcile local storage state only after both active/archived inventories
+      // and all Project inventories completed successfully. No files are deleted:
+      // disappeared conversations are moved to deleted/.
+      deletionReconciliationComplete =
+        doProjs &&
+        projectsInventoryComplete &&
+        projectConversationsInventoryComplete &&
+        !rateLimitStopped;
+
+      if (deletionReconciliationComplete) {
+        const localIndexBeforeExport = buildLocalConversationIndex(rootDir);
+
+        for (const record of localIndexBeforeExport.values()) {
+          const remote = inventoryById.get(record.conversationId);
+          let targetBaseDir;
+          let targetState;
+
+          if (!remote) {
+            targetBaseDir = join(rootDir, "deleted");
+            targetState = "deleted";
+          } else if (remote.isArchived === true) {
+            targetBaseDir = join(rootDir, "archived");
+            targetState = "archived";
+          } else if (remote.projectName) {
+            targetBaseDir = join(rootDir, "projects", sanitizeFilename(remote.projectName));
+            targetState = "project";
+          } else {
+            targetBaseDir = rootDir;
+            targetState = "active";
+          }
+          if (record.baseDir === targetBaseDir) continue;
+
+          try {
+            moveConversationArtifacts(record, targetBaseDir, record.fname);
+
+            if (targetState === "deleted") movedToDeleted++;
+            if (targetState === "archived" && record.state !== "archived") movedToArchived++;
+            if (record.state === "archived" && targetState !== "archived") restoredFromArchived++;
+            if (record.state === "deleted" && targetState !== "deleted") restoredFromDeleted++;
+
+            log(`STATE    "${record.convo.title || record.fname}" ${record.state} → ${targetState}`);
+          } catch (e) {
+            log(`STATE    "${record.convo.title || record.fname}" move failed: ${e.message}`);
+          }
+        }
+
+        if (movedToDeleted || movedToArchived || restoredFromArchived || restoredFromDeleted) {
+          sendEvent(
+            "status",
+            `Storage reconciled: ${movedToArchived} archived · ${movedToDeleted} deleted · ` +
+            `${restoredFromArchived + restoredFromDeleted} restored.`
+          );
+        }
+      } else {
+        log(
+          "STATE    reconciliation skipped because the complete Projects inventory was not available"
+        );
+      }
+
+      let allConversations = [...inventoryById.values()];
 
       // ── Date filter ────────────────────────────────────────────────
       if (dateFromMs > 0 || dateToMs < Infinity) {
@@ -1375,15 +1516,18 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
         // even when generating HTML inline during download.
         const convosByGroup = {};
         for (const item of allConversations) {
-          const key = item.projectName
-            ? `projects/${sanitizeFilename(item.projectName)}`
-            : "__root__";
+          const key = item.isArchived === true
+            ? "archived"
+            : item.projectName
+              ? `projects/${sanitizeFilename(item.projectName)}`
+              : "__root__";
           if (!convosByGroup[key]) convosByGroup[key] = [];
           const datePfxItem = safeDate(item.create_time) ? safeDate(item.create_time) + "_" : "";
           const s = sanitizeFilename(item.title || "Untitled");
           convosByGroup[key].push({ fname: `${datePfxItem}${s}_${item.id.slice(0, 8)}`, title: item.title || "Untitled" });
         }
 
+        const localConversationIndex = buildLocalConversationIndex(rootDir);
         const startTime = Date.now();
         const sem = new Semaphore(CONCURRENCY);
 
@@ -1394,6 +1538,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             if (rateLimitStopped) return;
 
             const { id: cid, title: rawTitle, projectName } = item;
+            const isArchived = item.isArchived === true;
             const title    = rawTitle || "Untitled";
             const safe     = sanitizeFilename(title);
             const d        = safeDate(item.create_time);
@@ -1401,7 +1546,11 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             const fname    = `${datePfx}${safe}_${cid.slice(0, 8)}`;
             const oldFname = `${safe}_${cid.slice(0, 8)}`; // pre-date format (backward compat)
 
-            const baseDirParts = projectName ? ["projects", sanitizeFilename(projectName)] : [];
+            const baseDirParts = isArchived
+              ? ["archived"]
+              : projectName
+                ? ["projects", sanitizeFilename(projectName)]
+                : [];
             const convJsonDir  = baseDirParts.length ? join(rootDir, ...baseDirParts, "json")     : jsonDir;
             const convMdDir    = baseDirParts.length ? join(rootDir, ...baseDirParts, "markdown") : mdDir;
             const convHtmlDir  = baseDirParts.length ? join(rootDir, ...baseDirParts, "html")     : htmlDir;
@@ -1418,21 +1567,17 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
               if (!existsSync(htmlPath)) {
                 try {
                   const groupKey = baseDirParts.length ? baseDirParts.join("/") : "__root__";
+                  const localFileMap = buildLocalFileMap(convFilesDir, fName);
                   mkdirSync(convHtmlDir, { recursive: true });
-                  writeFileSync(htmlPath, conversationToHtml(convo, {}, convosByGroup[groupKey] || [], fName), "utf8");
+                  writeFileSync(htmlPath, conversationToHtml(convo, localFileMap, convosByGroup[groupKey] || [], fName), "utf8");
                 } catch { /* non-fatal */ }
               }
             };
 
-            // Smart resume: find an existing local copy by conversation ID,
-            // regardless of title changes or old filename format.
-            let existing = findConversationJsonById(convJsonDir, cid);
-
-            // A conversation may previously have been exported at root level
-            // and now belong to a Project.
-            if (!existing && projectName) {
-              existing = findConversationJsonById(jsonDir, cid);
-            }
+            // Smart resume: locate an existing local copy across active,
+            // Project, archived and deleted storage. This lets state changes move
+            // a conversation without re-downloading it when the content is unchanged.
+            let existing = localConversationIndex.get(cid) || findConversationJsonById(convJsonDir, cid);
 
             let isUpdate = false;
 
@@ -1486,6 +1631,55 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                 }
 
                 return;
+              }
+            }
+
+            // State/location changed but the conversation contents did not. Move the
+            // complete local export atomically between active/Project/archived/deleted
+            // layouts instead of re-downloading it.
+            if (existing && !isUpdate && existing.path !== jsonPath) {
+              try {
+                const targetBaseDir = dirname(convJsonDir);
+                moveConversationArtifacts(existing, targetBaseDir, fname);
+
+                const localFileMap = buildLocalFileMap(convFilesDir, fname);
+                if (fmts.markdown) {
+                  mkdirSync(convMdDir, { recursive: true });
+                  writeFileSync(
+                    join(convMdDir, `${fname}.md`),
+                    conversationToMarkdown(existing.convo, localFileMap, markdownOptions),
+                    "utf8"
+                  );
+                }
+                if (fmts.html) {
+                  const groupKey = baseDirParts.length ? baseDirParts.join("/") : "__root__";
+                  mkdirSync(convHtmlDir, { recursive: true });
+                  writeFileSync(
+                    join(convHtmlDir, `${fname}.html`),
+                    conversationToHtml(existing.convo, localFileMap, convosByGroup[groupKey] || [], fname),
+                    "utf8"
+                  );
+                }
+
+                if (isArchived && existing.state !== "archived") movedToArchived++;
+                if (!isArchived && existing.state === "archived") restoredFromArchived++;
+                if (existing.state === "deleted") restoredFromDeleted++;
+
+                log(`MOVE     "${title}" ${existing.state || "local"} → ${isArchived ? "archived" : projectName ? `project:${projectName}` : "active"}`);
+                skipped++;
+                const doneMove = newCount + updatedCount + skipped + failed.length;
+                sendEvent("progress", JSON.stringify({
+                  current: doneMove,
+                  total,
+                  title,
+                  stats:
+                    `${newCount} new · ${updatedCount} updated · ` +
+                    `${skipped} resumed · ${failed.length} failed`,
+                }));
+                return;
+              } catch (e) {
+                log(`MOVE     "${title}" failed: ${e.message}; falling back to fresh download`);
+                isUpdate = true;
               }
             }
 
@@ -1683,6 +1877,9 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             }
 
             if (isUpdate && existing?.path !== jsonPath) {
+              if (isArchived && existing.state !== "archived") movedToArchived++;
+              if (!isArchived && existing.state === "archived") restoredFromArchived++;
+              if (existing.state === "deleted") restoredFromDeleted++;
               removePreviousConversationFiles(existing, jsonPath);
             }
 
@@ -1758,6 +1955,12 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       failedFileDetails,
       projects: projectCount,
       gpts: gptCount,
+      archived: archivedCount,
+      movedToArchived,
+      restoredFromArchived,
+      restoredFromDeleted,
+      movedToDeleted,
+      deletionReconciliationComplete,
     }));
 
   } catch (e) {
@@ -1834,6 +2037,8 @@ function collectMarkdownRegenerationTargets(rootDir) {
   };
 
   addGroup(rootDir);
+  addGroup(join(rootDir, "archived"));
+  addGroup(join(rootDir, "deleted"));
 
   const projectsDir = join(rootDir, "projects");
   if (existsSync(projectsDir)) {
