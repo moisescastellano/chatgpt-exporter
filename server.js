@@ -20,6 +20,7 @@ import { Buffer }                             from "node:buffer";
 import { execSync, spawn }                    from "node:child_process";
 import { fileURLToPath }                      from "node:url";
 import { conversationToMarkdown }             from "./lib/markdown.js";
+import { extractSandboxReferences, rewriteSandboxLinks } from "./lib/sandbox-files.js";
 
 const __dirname = (() => {
   try { return dirname(fileURLToPath(import.meta.url)); }
@@ -509,6 +510,85 @@ async function downloadFile(fileId, token, fallbackName, debugLog, gizmoId, conv
   return { filename, buffer };
 }
 
+async function downloadSandboxFile(ref, token, conversationId, projectId = null) {
+  if (!conversationId) throw new Error("Missing conversation id for sandbox file");
+  if (!ref?.sandboxPath) throw new Error("Missing sandbox path");
+
+  const messageIds = Array.isArray(ref.messageIds)
+    ? [...ref.messageIds].reverse()
+    : [];
+
+  if (!messageIds.length) throw new Error("Missing message id for sandbox file");
+
+  let lastError = null;
+
+  for (const messageId of messageIds) {
+    const params = new URLSearchParams({
+      message_id: messageId,
+      sandbox_path: ref.sandboxPath.replace(/^sandbox:/i, ""),
+      download_intent: "true",
+    });
+
+    const url =
+      `${API_BASE}/conversation/${encodeURIComponent(conversationId)}` +
+      `/interpreter/download?${params.toString()}`;
+
+    const headers = {
+      ...HEADERS,
+      Authorization: `Bearer ${token}`,
+    };
+
+    if (projectId) {
+      headers["chatgpt-project-id"] = projectId;
+    }
+
+    try {
+      const resp = await pacedChatGptFetch(() => debugFetch(url, { headers }));
+
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status}: ${body.slice(0, 300)}`);
+      }
+
+      const meta = await resp.json();
+      const downloadUrl =
+        meta.download_url ||
+        meta.url ||
+        meta.file_url ||
+        meta.presigned_url ||
+        meta.signed_url;
+
+      if (!downloadUrl) {
+        throw new Error(
+          `No download_url (keys: ${Object.keys(meta).join(",")})`
+        );
+      }
+
+      const { buffer, contentType } = await apiFetchBinary(downloadUrl, token);
+      let filename =
+        meta.file_name ||
+        meta.name ||
+        ref.filename ||
+        "generated_file";
+
+      if (!filename.includes(".") && contentType) {
+        const mime = contentType.split(";")[0].trim();
+        const ext = MIME_TO_EXT[mime];
+        if (ext) filename += ext;
+      }
+
+      return { filename, buffer };
+    } catch (e) {
+      if (e instanceof RateLimitStopError) throw e;
+
+      lastError = e;
+      dbg(`Sandbox download failed for message ${messageId}`, e.message);
+    }
+  }
+
+  throw lastError || new Error("Sandbox file download failed");
+}
+
 // ── HTML converter ───────────────────────────────────────────────────
 
 function conversationToHtml(convo, fileMap = {}, allConversations = [], currentFname = "") {
@@ -555,7 +635,7 @@ function conversationToHtml(convo, fileMap = {}, allConversations = [], currentF
             }
           }
         }
-        const text = stripCitations(textParts.join("\n")).trim();
+        const text = rewriteSandboxLinks(stripCitations(textParts.join("\n")), fileMap).trim();
         if (text || imageParts.length || attachments.length) {
           messages.push({ role, text, images: imageParts, attachments, isInternal, contentType });
         }
@@ -1509,7 +1589,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
 
             // Download attached files. Rebuild the conversation file directory
             // from scratch so stale files from older exports cannot survive.
-            const fileRefs       = extractFileReferences(convo);
+            const fileRefs       = [...extractFileReferences(convo), ...extractSandboxReferences(convo)];
             const fileMap        = {};
             const fileManifest   = {};
             const failedManifest = {};
@@ -1526,14 +1606,23 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
               for (const ref of fileRefs) {
                 totalFiles++;
                 try {
-                  const { filename: dlName, buffer } = await downloadFile(
-                    ref.fileId,
-                    token,
-                    ref.filename,
-                    null,
-                    null,
-                    convo.conversation_id || cid
-                  );
+                  const { filename: dlName, buffer } = ref.type === "sandbox"
+                    ? await downloadSandboxFile(
+                        ref,
+                        token,
+                        convo.conversation_id || cid,
+                        typeof convo.gizmo_id === "string" && convo.gizmo_id.startsWith("g-p-")
+                          ? convo.gizmo_id
+                          : null
+                      )
+                    : await downloadFile(
+                        ref.fileId,
+                        token,
+                        ref.filename,
+                        null,
+                        null,
+                        convo.conversation_id || cid
+                      );
                   const actualName = deduplicateFilename(
                     sanitizeFilename(dlName || ref.filename),
                     usedNames
