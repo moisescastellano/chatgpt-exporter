@@ -20,6 +20,8 @@ import { Buffer }                             from "node:buffer";
 import { execSync, spawn }                    from "node:child_process";
 import { fileURLToPath }                      from "node:url";
 import { conversationToMarkdown }             from "./lib/markdown.js";
+import { buildLocalFileMap, collectMarkdownRegenerationTargets } from "./lib/local-export.js";
+import { classifyResumeState, timestampMs }    from "./lib/resume-state.js";
 import { extractSandboxReferences, rewriteSandboxLinks } from "./lib/sandbox-files.js";
 import {
   buildLocalConversationIndex,
@@ -256,17 +258,6 @@ function safeDate(ct) {
     if (isNaN(d)) return "";
     return d.toISOString().slice(0, 10);
   } catch { return ""; }
-}
-
-function timestampMs(value) {
-  if (!value) return 0;
-
-  if (typeof value === "number") {
-    return value > 1e10 ? value : value * 1000;
-  }
-
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 function sanitizeFilename(name, maxLen = 80) {
@@ -1579,59 +1570,35 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             // a conversation without re-downloading it when the content is unchanged.
             let existing = localConversationIndex.get(cid) || findConversationJsonById(convJsonDir, cid);
 
-            let isUpdate = false;
+            const resumeState = classifyResumeState(existing, item, jsonPath);
+            let isUpdate = resumeState.isUpdate;
 
-            if (existing) {
-              const remoteUpdatedMs = timestampMs(item.update_time);
-              const localUpdatedMs  = existing.updatedMs;
+            if (resumeState.action === "resume") {
+              ensureHtml(existing.convo, fname);
 
-              const localTitle = existing.convo.title || "Untitled";
+              skipped++;
 
-              const pathChanged =
-                existing.path !== jsonPath;
+              const done =
+                newCount + updatedCount + skipped + failed.length;
 
-              const titleChanged =
-                localTitle !== title;
+              if (skipped % 25 === 0 || done === total) {
+                const elapsed =
+                  (Date.now() - startTime) / 1000 / 60;
 
-              const remoteIsNewer =
-                remoteUpdatedMs > 0 &&
-                remoteUpdatedMs > localUpdatedMs;
+                const rate =
+                  elapsed > 0 ? Math.round(done / elapsed) : 0;
 
-              const localTimestampMissing =
-                localUpdatedMs === 0;
-
-              isUpdate =
-                titleChanged ||
-                remoteIsNewer ||
-                localTimestampMissing;
-
-              if (!isUpdate && !pathChanged) {
-                ensureHtml(existing.convo, fname);
-
-                skipped++;
-
-                const done =
-                  newCount + updatedCount + skipped + failed.length;
-
-                if (skipped % 25 === 0 || done === total) {
-                  const elapsed =
-                    (Date.now() - startTime) / 1000 / 60;
-
-                  const rate =
-                    elapsed > 0 ? Math.round(done / elapsed) : 0;
-
-                  sendEvent("progress", JSON.stringify({
-                    current: done,
-                    total,
-                    title,
-                    stats:
-                      `${newCount} new · ${updatedCount} updated · ` +
-                      `${skipped} resumed · ${failed.length} failed · ${rate}/min`,
-                  }));
-                }
-
-                return;
+                sendEvent("progress", JSON.stringify({
+                  current: done,
+                  total,
+                  title,
+                  stats:
+                    `${newCount} new · ${updatedCount} updated · ` +
+                    `${skipped} resumed · ${failed.length} failed · ${rate}/min`,
+                }));
               }
+
+              return;
             }
 
             // State/location changed but the conversation contents did not. Move the
@@ -1976,83 +1943,6 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
 }
 
 // ── Local Markdown regeneration ──────────────────────────────────────
-
-function buildLocalFileMap(filesDir, fname) {
-  const fileMap = {};
-  const convFilesDir = join(filesDir, fname);
-  const manifestPath = join(convFilesDir, ".file-map.json");
-
-  if (!existsSync(manifestPath)) return fileMap;
-
-  try {
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    const files = manifest?.files;
-    if (!files || typeof files !== "object") return fileMap;
-
-    for (const [fileId, actualName] of Object.entries(files)) {
-      if (!fileId || typeof actualName !== "string") continue;
-      if (basename(actualName) !== actualName) continue;
-      if (!existsSync(join(convFilesDir, actualName))) continue;
-
-      fileMap[fileId] = `../files/${fname}/${actualName}`;
-    }
-  } catch {
-    // Missing/corrupt manifests simply mean that attachments are rendered
-    // by name without a local link. Never guess file identity by filename.
-  }
-
-  return fileMap;
-}
-
-function collectMarkdownRegenerationTargets(rootDir) {
-  const targets = [];
-
-  const addGroup = (baseDir) => {
-    const jsonDir = join(baseDir, "json");
-    if (!existsSync(jsonDir)) return;
-
-    const mdDir = join(baseDir, "markdown");
-    const filesDir = join(baseDir, "files");
-
-    let names = [];
-    try {
-      names = readdirSync(jsonDir, { withFileTypes: true })
-        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
-        .map((entry) => entry.name)
-        .sort();
-    } catch {
-      return;
-    }
-
-    for (const name of names) {
-      const fname = name.slice(0, -5);
-      targets.push({
-        jsonPath: join(jsonDir, name),
-        mdPath: join(mdDir, `${fname}.md`),
-        mdDir,
-        filesDir,
-        fname,
-      });
-    }
-  };
-
-  addGroup(rootDir);
-  addGroup(join(rootDir, "archived"));
-  addGroup(join(rootDir, "deleted"));
-
-  const projectsDir = join(rootDir, "projects");
-  if (existsSync(projectsDir)) {
-    try {
-      for (const entry of readdirSync(projectsDir, { withFileTypes: true })) {
-        if (entry.isDirectory()) addGroup(join(projectsDir, entry.name));
-      }
-    } catch {
-      // Ignore an unreadable projects directory; root conversations can still regenerate.
-    }
-  }
-
-  return targets;
-}
 
 async function regenerateMarkdown(outputDir, markdownOptions, sendEvent) {
   const rootDir = outputDir.startsWith("~")

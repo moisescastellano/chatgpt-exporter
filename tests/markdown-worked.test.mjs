@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { APP_VERSION, conversationToMarkdown } from "../lib/markdown.js";
+import { rewriteSandboxLinks } from "../lib/sandbox-files.js";
 
 const options = {
   thoughtProcess: true,
@@ -207,7 +208,7 @@ if (process.argv[2]) {
       if (msg.content?.content_type !== "text") continue;
       for (const part of msg.content.parts || []) {
         if (typeof part !== "string") continue;
-        const chunks = part
+        const chunks = rewriteSandboxLinks(part, {})
           .replace(/\ue200[^\ue201]*\ue201/g, "\u0000")
           .replace(/\u3010[^\u3011]*\u3011/g, "\u0000")
           .split("\u0000")
