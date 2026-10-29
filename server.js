@@ -114,10 +114,11 @@ const API_MIN_INTERVAL_MS = 1000;
 
 // All ChatGPT API requests share one paced queue.
 // External signed download URLs are not part of this queue.
-let nextApiRequestAt = 0;
-let apiRequestChain  = Promise.resolve();
-let rateLimitStopped = false;
-let onRateLimitStop  = null;
+let nextApiRequestAt    = 0;
+let apiRequestChain     = Promise.resolve();
+let rateLimitStopped    = false;
+let rateLimitRetryAfter = null;
+let onRateLimitStop     = null;
 
 class RateLimitStopError extends Error {
   constructor(retryAfter = null) {
@@ -137,10 +138,11 @@ class RateLimitStopError extends Error {
 }
 
 function resetRateLimiter() {
-  nextApiRequestAt = 0;
-  apiRequestChain  = Promise.resolve();
-  rateLimitStopped = false;
-  onRateLimitStop  = null;
+  nextApiRequestAt    = 0;
+  apiRequestChain     = Promise.resolve();
+  rateLimitStopped    = false;
+  rateLimitRetryAfter = null;
+  onRateLimitStop     = null;
 }
 
 async function pacedChatGptFetch(fn) {
@@ -168,6 +170,7 @@ async function pacedChatGptFetch(fn) {
       rateLimitStopped = true;
 
       const retryAfter = resp.headers.get("retry-after");
+      rateLimitRetryAfter = retryAfter || null;
       const err = new RateLimitStopError(retryAfter);
 
       dbg("429 rate limited — stopping export", {
@@ -1141,6 +1144,10 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       else if (type === "done")     { const d = JSON.parse(data); log(`DONE     ${d.succeeded} new · ${d.updated || 0} updated · ` +    `${d.skipped} resumed · ${d.failed} failed · output: ${d.output}`
   );
 }
+      else if (type === "rate_limited") {
+        const d = JSON.parse(data);
+        log(`RATE     ${d.message}${d.remaining !== undefined ? ` · ${d.remaining} remaining` : ""}`);
+      }
       else if (type === "error_msg") log(`ERROR    ${data}`);
     };
 
@@ -1910,6 +1917,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       processed,
       remaining,
       rateLimited: rateLimitStopped,
+      rateLimitRetryAfter,
       succeeded: newCount,
       updated: updatedCount,
       skipped,
@@ -1932,7 +1940,10 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
 
   } catch (e) {
     if (e instanceof RateLimitStopError) {
-      sendEvent("error_msg", e.message);
+      sendEvent("rate_limited", JSON.stringify({
+        message: e.message,
+        retryAfter: e.retryAfter || rateLimitRetryAfter,
+      }));
     } else {
       sendEvent("error_msg", `Export failed: ${e.message}`);
     }
@@ -2081,11 +2092,21 @@ const server = createServer((req, res) => {
         } else if (type === "done") {
           const d = JSON.parse(data);
           process.stdout.write(`\r\x1b[2K`);
-          console.log(
-            `\n✓ Done — ${d.succeeded} new · ${d.updated || 0} updated · ` +
-            `${d.skipped} resumed · ${d.failed} failed`
-          );
+          if (d.rateLimited) {
+            console.warn(
+              `\n⚠ Export paused by ChatGPT rate limit — ` +
+              `${d.processed}/${d.total} conversations processed · ${d.remaining} remaining`
+            );
+          } else {
+            console.log(
+              `\n✓ Done — ${d.succeeded} new · ${d.updated || 0} updated · ` +
+              `${d.skipped} resumed · ${d.failed} failed`
+            );
+          }
           console.log(`  Saved to: ${d.output}\n`);
+        } else if (type === "rate_limited") {
+          const d = JSON.parse(data);
+          console.warn(`\n⚠ ${d.message}\n`);
         } else if (type === "error_msg") {
           console.error(`\n✗ ${data}\n`);
         }

@@ -85,6 +85,7 @@
   .result { margin-top: 20px; padding: 16px; border-radius: 8px; font-size: 14px; line-height: 1.6; }
   .result code { font-size: 12px; word-break: break-all; }
   .result.success { background: #14532d; color: #bbf7d0; }
+  .result.warning { background: #78350f; color: #fde68a; }
   .result.error   { background: #7f1d1d; color: #fecaca; }
   .toggle-row { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; }
   .toggle { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
@@ -633,19 +634,61 @@
           resetUI();
         });
 
+        // A 429 that happens before the conversation queue is available cannot
+        // provide reliable processed/remaining counts. Treat it as a safe pause,
+        // not as a generic export failure.
+        evtSource.addEventListener('rate_limited', (e) => {
+          exportDone = true;
+          evtSource.close();
+          const d = JSON.parse(e.data);
+          document.getElementById('progress-bar').style.background = '#f59e0b';
+          document.getElementById('progress-text').textContent = 'Export paused by ChatGPT rate limit.';
+          document.getElementById('current-title').textContent = '';
+
+          let msg = '<strong>Export paused by ChatGPT rate limit.</strong>' +
+            '<br><br>ChatGPT returned HTTP 429 before the export could finish.';
+          if (d.retryAfter) msg += '<br>Retry-After: <code>' + d.retryAfter + '</code>.';
+          msg += '<br><br><strong>No saved progress was lost.</strong> Run the export again later using the same output folder. Smart Resume will continue from the data already saved.';
+          showResult('warning', msg);
+          resetUI();
+        });
+
         evtSource.addEventListener('done', (e) => {
           exportDone = true;
           evtSource.close();
           const d = JSON.parse(e.data);
-          document.getElementById('progress-bar').style.width     = '100%';
-          document.getElementById('progress-bar').style.background = '#22c55e';
+          const bar = document.getElementById('progress-bar');
 
           let msg;
-          if (d.total === 0) {
-            msg = 'No active or archived conversations found in your account.';
+          let resultType = 'success';
+
+          if (d.rateLimited) {
+            const processed = d.processed ?? ((d.succeeded || 0) + (d.updated || 0) + (d.skipped || 0) + (d.failed || 0));
+            const remaining = d.remaining ?? Math.max(0, (d.total || 0) - processed);
+            const pct = d.total > 0 ? Math.round((processed / d.total) * 100) : 0;
+
+            bar.style.width = pct + '%';
+            bar.style.background = '#f59e0b';
+            document.getElementById('progress-text').textContent =
+              'Paused at ' + processed + ' of ' + d.total + ' (' + pct + '%) — ChatGPT rate limit';
+            document.getElementById('current-title').textContent = '';
+
+            msg = '<strong>Export paused by ChatGPT rate limit.</strong>' +
+              '<br>' + processed + ' of ' + d.total + ' conversations processed · ' + remaining + ' remaining.' +
+              '<br>' + d.succeeded + ' new · ' + (d.updated || 0) + ' updated · ' + d.skipped + ' resumed · ' + d.failed + ' failed.';
+            if (d.rateLimitRetryAfter) msg += '<br>Retry-After: <code>' + d.rateLimitRetryAfter + '</code>.';
+            msg += '<br><br><strong>No saved progress was lost.</strong> Run the export again later using the same output folder. Smart Resume will continue without re-downloading completed conversations.';
+            resultType = 'warning';
           } else {
-            msg = 'Done! ' + d.succeeded + ' new · ' + (d.updated || 0) + ' updated · ' + d.skipped + ' resumed · ' +  d.failed + ' failed';
+            bar.style.width = '100%';
+            bar.style.background = '#22c55e';
+            if (d.total === 0) {
+              msg = 'No active or archived conversations found in your account.';
+            } else {
+              msg = 'Done! ' + d.succeeded + ' new · ' + (d.updated || 0) + ' updated · ' + d.skipped + ' resumed · ' + d.failed + ' failed';
+            }
           }
+
           if (d.archived > 0) msg += '<br>' + d.archived + ' archived conversation(s) stored under <code>archived/</code>.';
           if (d.movedToArchived > 0) msg += '<br>' + d.movedToArchived + ' conversation(s) moved to <code>archived/</code>.';
           if (d.restoredFromArchived > 0) msg += '<br>' + d.restoredFromArchived + ' conversation(s) restored from <code>archived/</code>.';
@@ -653,12 +696,12 @@
           if (d.movedToDeleted > 0) msg += '<br>' + d.movedToDeleted + ' conversation(s) no longer found in ChatGPT and moved to <code>deleted/</code>.';
           if (exportOptions.conversations && d.deletionReconciliationComplete === false) msg += '<br>Deleted-conversation reconciliation was skipped because a complete inventory was not available.';
           if (d.totalFiles > 0) msg += '<br>' + (d.totalFiles - d.failedFiles) + ' of ' + d.totalFiles + ' files downloaded.';
-          if (d.projects   > 0) msg += '<br>' + d.projects + ' project(s) exported.';
-          if (d.gpts       > 0) msg += '<br>' + d.gpts + ' GPT(s) exported to <code>gpts/</code>';
+          if (d.projects > 0) msg += '<br>' + d.projects + ' project(s) exported.';
+          if (d.gpts > 0) msg += '<br>' + d.gpts + ' GPT(s) exported to <code>gpts/</code>';
           msg += '<br><br>Saved to:<br><code>' + d.output + '</code>';
           if (d.failedTitles && d.failedTitles.length)
             msg += '<br><br>' + d.failed + ' conversations failed: ' + d.failedTitles.join(', ');
-          showResult('success', msg);
+          showResult(resultType, msg);
           resetUI();
         });
 
