@@ -53,6 +53,10 @@ These features have been added in this fork and may not be available in the upst
 
 The raw conversation JSON remains the canonical local copy. Markdown can therefore be regenerated later with different formatting options without downloading the conversation again.
 
+## Documentation
+
+See the [User Manual](USER_MANUAL.md) for detailed usage, Smart Resume behavior, Markdown options, archived/deleted conversations, attachments, and ChatGPT-generated `sandbox:/...` files.
+
 ## Output structure
 
 ```text
