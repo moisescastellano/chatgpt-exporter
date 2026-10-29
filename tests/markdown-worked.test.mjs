@@ -203,8 +203,19 @@ if (process.argv[2]) {
       if (msg.content?.content_type !== "text") continue;
       for (const part of msg.content.parts || []) {
         if (typeof part !== "string") continue;
-        const text = part.replace(/\u3010[^\u3011]*\u3011/g, "").trim();
-        if (text) assert.ok(md.includes(text), `Lost message text: ${msg.id}`);
+        const chunks = part
+          .replace(/\ue200[^\ue201]*\ue201/g, "\u0000")
+          .replace(/\u3010[^\u3011]*\u3011/g, "\u0000")
+          .split("\u0000")
+          .map((chunk) => chunk.trim())
+          .filter(Boolean);
+
+        let from = 0;
+        for (const chunk of chunks) {
+          const index = md.indexOf(chunk, from);
+          assert.ok(index >= 0, `Lost message text: ${msg.id}`);
+          from = index + chunk.length;
+        }
       }
     }
   });
