@@ -123,6 +123,23 @@
   .date-field input[type="text"]:focus { border-color: #3b82f6; }
   .date-sep { color: #64748b; font-size: 13px; padding-bottom: 10px; }
   .options-hint { font-size: 11px; color: #475569; margin-top: 6px; }
+  .project-export-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .project-export-row .opt-check { margin-right: 2px; }
+  .project-selection-summary { font-size: 12px; color: #64748b; }
+  .project-choose-btn {
+    width: auto; padding: 5px 10px; border-radius: 6px; font-size: 12px;
+    background: #1e3a5f; color: #93c5fd; border: 1px solid #2563eb;
+  }
+  .project-choose-btn:hover { background: #1e40af; color: #fff; }
+  .project-choose-btn:disabled { opacity: 0.45; cursor: default; background: #334155; color: #94a3b8; border-color: #475569; }
+  .project-picker-actions { display: flex; gap: 8px; padding: 8px 16px; border-bottom: 1px solid #334155; }
+  .project-picker-actions button { width: auto; padding: 5px 10px; font-size: 12px; border-radius: 6px; background: #334155; }
+  .project-picker-actions button:hover { background: #475569; }
+  .project-item { display: flex; align-items: center; gap: 10px; padding: 9px 16px; font-size: 13px; color: #cbd5e1; }
+  .project-item:hover { background: #334155; }
+  .project-item input { accent-color: #3b82f6; width: 14px; height: 14px; }
+  .project-picker-status { padding: 18px 16px; font-size: 13px; color: #94a3b8; text-align: center; }
+  .project-picker-status.error { color: #fecaca; }
 
   /* Folder picker modal */
   .fp-overlay {
@@ -209,6 +226,28 @@
   </div>
 </div>
 
+<!-- Project picker modal -->
+<div class="fp-overlay" id="project-overlay" onclick="if(event.target===this)projectClose()">
+  <div class="fp-modal">
+    <div class="fp-header">
+      <h3>Choose Projects</h3>
+      <button class="fp-btn-cancel" onclick="projectClose()" style="width:auto;padding:4px 10px;font-size:12px">✕</button>
+    </div>
+    <div class="project-picker-actions">
+      <button type="button" onclick="projectSelectAll()">Select all</button>
+      <button type="button" onclick="projectClearAll()">Clear all</button>
+      <span id="project-picker-count" class="project-selection-summary" style="margin-left:auto;align-self:center"></span>
+    </div>
+    <div class="fp-list" id="project-list">
+      <div class="project-picker-status">Load Projects to choose which ones to export.</div>
+    </div>
+    <div class="fp-footer">
+      <button class="fp-btn-cancel" onclick="projectClose()">Cancel</button>
+      <button class="fp-btn-select" id="project-apply-btn" onclick="projectApplySelection()">Apply</button>
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <h1>ChatGPT Exporter</h1>
   <p class="subtitle">Export all your conversations as JSON, Markdown &amp; HTML — with resume &amp; projects support</p>
@@ -261,7 +300,11 @@
         <div class="options-group-label">What to export</div>
         <div class="opt-checks">
           <label class="opt-check"><input type="checkbox" id="opt-conversations" checked> Conversations</label>
-          <label class="opt-check"><input type="checkbox" id="opt-projects" checked> Projects</label>
+          <div class="project-export-row">
+            <label class="opt-check"><input type="checkbox" id="opt-projects" checked onchange="syncProjectChooserState()"> Projects</label>
+            <span id="project-selection-summary" class="project-selection-summary">All</span>
+            <button type="button" id="project-choose-btn" class="project-choose-btn" onclick="openProjectPicker(event)">Choose...</button>
+          </div>
           <label class="opt-check"><input type="checkbox" id="opt-gpts" checked> GPTs</label>
         </div>
       </div>
@@ -540,6 +583,160 @@
     }
   });
 
+  // ── Optional Project selection ────────────────────────────────────
+  // null means "all Projects". The choice is intentionally not persisted in
+  // localStorage so a fresh page always defaults to the safest full export.
+  let _availableProjects = [];
+  let _selectedProjectIds = null;
+  let _projectDraftIds = new Set();
+  let _projectsLoaded = false;
+
+  function parseSessionToken() {
+    const raw = document.getElementById('token-input').value.trim();
+    if (!raw) throw new Error('Paste the session JSON first.');
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch { throw new Error('Invalid session JSON. Copy the entire /api/auth/session page.'); }
+    if (!parsed.accessToken) throw new Error('No "accessToken" found in the session JSON.');
+    return parsed.accessToken;
+  }
+
+  function syncProjectChooserState() {
+    const enabled = document.getElementById('opt-projects').checked;
+    document.getElementById('project-choose-btn').disabled = !enabled;
+    document.getElementById('project-selection-summary').style.opacity = enabled ? '1' : '0.45';
+  }
+
+  function updateProjectSummary() {
+    const el = document.getElementById('project-selection-summary');
+    if (!_projectsLoaded) {
+      el.textContent = 'All';
+      return;
+    }
+    const total = _availableProjects.length;
+    if (_selectedProjectIds === null) el.textContent = total ? `All ${total}` : 'No Projects found';
+    else el.textContent = `${_selectedProjectIds.length} of ${total} selected`;
+  }
+
+  function updateProjectDraftCount() {
+    const el = document.getElementById('project-picker-count');
+    if (el) el.textContent = `${_projectDraftIds.size} of ${_availableProjects.length} selected`;
+  }
+
+  function renderProjectPicker() {
+    const list = document.getElementById('project-list');
+    list.innerHTML = '';
+
+    if (!_availableProjects.length) {
+      list.innerHTML = '<div class="project-picker-status">No Projects found.</div>';
+      updateProjectDraftCount();
+      return;
+    }
+
+    for (const project of _availableProjects) {
+      const label = document.createElement('label');
+      label.className = 'project-item';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = _projectDraftIds.has(project.id);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) _projectDraftIds.add(project.id);
+        else _projectDraftIds.delete(project.id);
+        updateProjectDraftCount();
+      });
+      const text = document.createElement('span');
+      text.textContent = project.name;
+      label.appendChild(checkbox);
+      label.appendChild(text);
+      list.appendChild(label);
+    }
+    updateProjectDraftCount();
+  }
+
+  async function loadProjectsForPicker() {
+    const list = document.getElementById('project-list');
+    list.innerHTML = '<div class="project-picker-status">Loading Projects...</div>';
+    document.getElementById('project-apply-btn').disabled = true;
+
+    let token;
+    try {
+      token = parseSessionToken();
+    } catch (e) {
+      list.innerHTML = '<div class="project-picker-status error"></div>';
+      list.firstElementChild.textContent = e.message;
+      return false;
+    }
+
+    try {
+      const resp = await fetch('/list-projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+      const previousSelection = _selectedProjectIds === null ? null : new Set(_selectedProjectIds);
+      _availableProjects = Array.isArray(data.projects) ? data.projects : [];
+      _projectsLoaded = true;
+
+      if (previousSelection === null) {
+        _projectDraftIds = new Set(_availableProjects.map((p) => p.id));
+      } else {
+        _projectDraftIds = new Set(
+          _availableProjects.filter((p) => previousSelection.has(p.id)).map((p) => p.id)
+        );
+      }
+
+      renderProjectPicker();
+      document.getElementById('project-apply-btn').disabled = false;
+      return true;
+    } catch (e) {
+      list.innerHTML = '<div class="project-picker-status error"></div>';
+      list.firstElementChild.textContent = 'Could not load Projects: ' + e.message;
+      return false;
+    }
+  }
+
+  async function openProjectPicker(event) {
+    if (event) event.preventDefault();
+    if (!document.getElementById('opt-projects').checked) return;
+    document.getElementById('project-overlay').classList.add('open');
+
+    if (!_projectsLoaded) {
+      await loadProjectsForPicker();
+    } else {
+      _projectDraftIds = _selectedProjectIds === null
+        ? new Set(_availableProjects.map((p) => p.id))
+        : new Set(_selectedProjectIds);
+      renderProjectPicker();
+    }
+  }
+
+  function projectClose() {
+    document.getElementById('project-overlay').classList.remove('open');
+  }
+
+  function projectSelectAll() {
+    _projectDraftIds = new Set(_availableProjects.map((p) => p.id));
+    renderProjectPicker();
+  }
+
+  function projectClearAll() {
+    _projectDraftIds = new Set();
+    renderProjectPicker();
+  }
+
+  function projectApplySelection() {
+    const allSelected = _projectDraftIds.size === _availableProjects.length;
+    _selectedProjectIds = allSelected ? null : [..._projectDraftIds];
+    updateProjectSummary();
+    projectClose();
+  }
+
+  syncProjectChooserState();
+  updateProjectSummary();
+
   function getMarkdownOptions() {
     return {
       conversationMetadata: document.getElementById('md-conversation-metadata').checked,
@@ -562,6 +759,7 @@
     const exportOptions = {
       conversations: document.getElementById('opt-conversations').checked,
       projects:      document.getElementById('opt-projects').checked,
+      selectedProjectIds: _selectedProjectIds,
       gpts:          document.getElementById('opt-gpts').checked,
       formats: {
         json:     document.getElementById('opt-json').checked,

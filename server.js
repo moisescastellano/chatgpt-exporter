@@ -22,6 +22,7 @@ import { fileURLToPath }                      from "node:url";
 import { conversationToMarkdown }             from "./lib/markdown.js";
 import { buildLocalFileMap, collectMarkdownRegenerationTargets } from "./lib/local-export.js";
 import { classifyResumeState, timestampMs }    from "./lib/resume-state.js";
+import { filterSelectedProjects, normalizeSelectedProjectIds, conversationMatchesProjectSelection } from "./lib/project-selection.js";
 import { extractSandboxReferences, rewriteSandboxLinks } from "./lib/sandbox-files.js";
 import {
   buildLocalConversationIndex,
@@ -908,7 +909,7 @@ function generateExportIndex(rootDir, allProjects) {
       : [];
     const hasInfo   = existsSync(join(projDir, "project-info.md"));
     return { name: proj.name, safe, convos, resources, hasInfo };
-  });
+  }).filter((proj) => proj.hasInfo || proj.resources.length > 0 || proj.convos.length > 0);
 
   writeFileSync(
     join(rootDir, "index.html"),
@@ -1081,6 +1082,42 @@ if(location.hash){
 </body></html>`;
 }
 
+async function fetchProjectsInventory(token, onFound = null) {
+  const projects = [];
+  let cursor = null;
+
+  while (true) {
+    const qs = `owned_only=true&conversations_per_gizmo=0&limit=20${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`;
+    const data = await pacedChatGptFetch(() => debugFetch(`${API_BASE}/gizmos/snorlax/sidebar?${qs}`, {
+      headers: { ...HEADERS, Authorization: `Bearer ${token}` },
+    })).then(async (r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
+
+    const items = data.list?.items || data.items || [];
+    if (!items.length) break;
+
+    for (const item of items) {
+      const wrapper = item.resource?.gizmo || item.gizmo || item;
+      const gizmo = wrapper.gizmo || wrapper;
+      const gizmoId = gizmo.id || "";
+      if (!gizmoId.startsWith("g-p-")) continue;
+      const name = gizmo.display?.name || gizmo.name || gizmoId;
+      const files = wrapper.files || [];
+      const project = { gizmoId, name, gizmo, files };
+      projects.push(project);
+      if (onFound) onFound(project);
+    }
+
+    cursor = data.list?.cursor || data.cursor || null;
+    if (!cursor) break;
+    await sleep(DELAY);
+  }
+
+  return projects;
+}
+
 // ── Export logic ─────────────────────────────────────────────────────
 
 async function runExport(token, outputDir, concurrency, createZip, keepAwake, exportOptions, sendEvent) {
@@ -1119,6 +1156,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     const doGpts      = exportOptions?.gpts          !== false;
     const doProjs     = exportOptions?.projects      !== false;
     const doConvs     = exportOptions?.conversations !== false;
+    const selectedProjectIds = normalizeSelectedProjectIds(exportOptions?.selectedProjectIds);
     const dateFromMs  = exportOptions?.dateFrom ? Date.parse(exportOptions.dateFrom)                         : 0;
     const dateToMs    = exportOptions?.dateTo   ? Date.parse(exportOptions.dateTo + "T23:59:59.999Z") : Infinity;
     const rootDir     = outputDir.startsWith("~")
@@ -1208,37 +1246,18 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     }
 
     // ── Fetch projects ────────────────────────────────────────────────
-    const allProjects = [];
+    // Always inventory every Project when Projects are enabled. Selection only
+    // limits what gets exported; the full inventory is still required to keep
+    // archived/deleted reconciliation safe.
+    let allProjects = [];
     let projectsInventoryComplete = !doProjs;
     if (doProjs) {
       projectsInventoryComplete = true;
       try {
         sendEvent("status", "Fetching projects...");
-        let cursor = null;
-        while (true) {
-          const qs   = `owned_only=true&conversations_per_gizmo=0&limit=20${cursor ? "&cursor=" + encodeURIComponent(cursor) : ""}`;
-          const data = await pacedChatGptFetch(() => debugFetch(`${API_BASE}/gizmos/snorlax/sidebar?${qs}`, {
-            headers: { ...HEADERS, Authorization: `Bearer ${token}` },
-          })).then(async (r) => {
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            return r.json();
-          });
-          const items = data.list?.items || data.items || [];
-          if (!items.length) break;
-          for (const item of items) {
-            const wrapper = item.resource?.gizmo || item.gizmo || item;
-            const gizmo   = wrapper.gizmo || wrapper;
-            const gizmoId = gizmo.id || "";
-            if (!gizmoId.startsWith("g-p-")) continue;
-            const name  = gizmo.display?.name || gizmo.name || gizmoId;
-            const files = wrapper.files || [];
-            allProjects.push({ gizmoId, name, gizmo, files });
-            sendEvent("status", `Found project: ${name}`);
-          }
-          cursor = data.list?.cursor || data.cursor || null;
-          if (!cursor) break;
-          await sleep(DELAY);
-        }
+        allProjects = await fetchProjectsInventory(token, (project) => {
+          sendEvent("status", `Found project: ${project.name}`);
+        });
       } catch (e) {
         if (e instanceof RateLimitStopError) throw e;
         projectsInventoryComplete = false;
@@ -1246,10 +1265,20 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       }
     }
 
+    const selectedProjects = doProjs
+      ? filterSelectedProjects(allProjects, exportOptions?.selectedProjectIds)
+      : [];
+
+    if (doProjs && selectedProjectIds !== null) {
+      sendEvent("status", `Project selection: ${selectedProjects.length} of ${allProjects.length} selected.`);
+      log(`PROJECT  selection: ${selectedProjects.length}/${allProjects.length}`);
+    }
+
     // ── Map project conversation IDs → projectName ───────────────────
     // Done before the main conversation fetch so projectName is assigned
     // in a single pass (O(1) map lookup instead of O(n) find).
     const projectConvMap   = new Map(); // convId → projectName
+    const projectConvIdMap = new Map(); // convId → project gizmo ID
     const projectConvExtra = [];        // convs only in project lists, not in main endpoint
     let projectConversationsInventoryComplete = !(doProjs && doConvs);
     if (doProjs && doConvs) projectConversationsInventoryComplete = projectsInventoryComplete;
@@ -1267,7 +1296,11 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             if (!items.length) break;
             for (const c of items) {
               projectConvMap.set(c.id, projName);
-              if (!seen.has(c.id)) { seen.add(c.id); projectConvExtra.push({ ...c, projectName: projName }); }
+              projectConvIdMap.set(c.id, proj.gizmoId);
+              if (!seen.has(c.id)) {
+                seen.add(c.id);
+                projectConvExtra.push({ ...c, projectName: projName, projectId: proj.gizmoId });
+              }
             }
             cur = data.cursor || data.next_cursor || null;
             if (!cur) break;
@@ -1285,14 +1318,14 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
     // ── Export project metadata + resources ──────────────────────────
     if (doProjs) {
       try {
-        for (let pi = 0; pi < allProjects.length; pi++) {
-          const proj = allProjects[pi];
+        for (let pi = 0; pi < selectedProjects.length; pi++) {
+          const proj = selectedProjects[pi];
           const projName = proj.name;
           const projSafe = sanitizeFilename(projName);
           const projDir  = join(rootDir, "projects", projSafe);
           mkdirSync(projDir, { recursive: true });
 
-          sendEvent("status", `Exporting project ${pi + 1}/${allProjects.length}: ${projName}`);
+          sendEvent("status", `Exporting project ${pi + 1}/${selectedProjects.length}: ${projName}`);
 
           const infoMd = projectToMarkdown(proj.gizmo);
           writeFileSync(join(projDir, "project-info.md"), infoMd, "utf8");
@@ -1308,7 +1341,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
                 const rawId    = f.file_id || f.id || "";
                 const fileId   = rawId.startsWith("file") ? rawId : `file-${rawId}`;
                 const fileName = f.name || f.filename || rawId;
-                sendEvent("status", `Project ${pi + 1}/${allProjects.length} "${projName}" — downloading file ${fi + 1}/${filesList.length}: ${fileName}`);
+                sendEvent("status", `Project ${pi + 1}/${selectedProjects.length} "${projName}" — downloading file ${fi + 1}/${filesList.length}: ${fileName}`);
                 try {
                   const { buffer, filename: dlName } = await downloadFile(fileId, token, fileName, null, proj.gizmoId);
                   const safe = sanitizeFilename(dlName || fileName);
@@ -1328,7 +1361,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
 
           log(`PROJECT  "${projName}" exported`);
         }
-        if (allProjects.length) sendEvent("status", `Exported ${allProjects.length} project(s).`);
+        if (selectedProjects.length) sendEvent("status", `Exported ${selectedProjects.length} project(s).`);
       } catch (e) {
         if (e instanceof RateLimitStopError) throw e;
         log(`Projects export skipped: ${e.message}`);
@@ -1381,6 +1414,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
             ...c,
             isArchived,
             projectName: projectConvMap.get(c.id) || null,
+            projectId: projectConvIdMap.get(c.id) || null,
           })));
 
           sendEvent(
@@ -1416,6 +1450,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
           ...c,
           isArchived: c.is_archived === true,
           projectName: c.projectName || projectConvMap.get(c.id) || null,
+          projectId: c.projectId || projectConvIdMap.get(c.id) || null,
         });
       }
 
@@ -1483,6 +1518,18 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       }
 
       let allConversations = [...inventoryById.values()];
+
+      // Optional Project selection limits only the work queue. Root conversations
+      // remain in scope, while conversations known to belong to unselected Projects
+      // are skipped. The full inventory above remains untouched for reconciliation.
+      if (doProjs && selectedProjectIds !== null) {
+        const before = allConversations.length;
+        allConversations = allConversations.filter((conversation) =>
+          conversationMatchesProjectSelection(conversation, selectedProjectIds)
+        );
+        log(`PROJECT  conversation selection: ${before} → ${allConversations.length}`);
+        sendEvent("status", `Project selection: ${allConversations.length} conversations in export scope.`);
+      }
 
       // ── Date filter ────────────────────────────────────────────────
       if (dateFromMs > 0 || dateToMs < Infinity) {
@@ -1906,7 +1953,7 @@ async function runExport(token, outputDir, concurrency, createZip, keepAwake, ex
       } catch (e) { log(`INDEX    failed: ${e.message}`); }
     }
 
-    const projectCount = doProjs ? allProjects.length : 0;
+    const projectCount = doProjs ? selectedProjects.length : 0;
 
     const processed = newCount + updatedCount + skipped + failed.length;
 
@@ -2050,6 +2097,51 @@ const server = createServer((req, res) => {
       res.writeHead(500);
       res.end("Could not find public/index.html — place the 'public' folder next to the exe.");
     }
+
+  // List Projects for the optional Project selector. This fetches only the
+  // lightweight Project inventory; it does not download conversations or files.
+  } else if (req.method === "POST" && req.url === "/list-projects") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", async () => {
+      let token;
+      try {
+        token = JSON.parse(body || "{}").token;
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        return;
+      }
+
+      if (!token) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "No token provided" }));
+        return;
+      }
+
+      resetRateLimiter();
+      try {
+        const projects = await fetchProjectsInventory(token);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          projects: projects.map((project) => ({ id: project.gizmoId, name: project.name })),
+        }));
+      } catch (e) {
+        if (e instanceof RateLimitStopError) {
+          res.writeHead(429, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: e.message,
+            rateLimited: true,
+            retryAfter: e.retryAfter || null,
+          }));
+        } else {
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Could not load Projects: ${e.message}` }));
+        }
+      } finally {
+        resetRateLimiter();
+      }
+    });
 
   // Start export
   } else if (req.method === "POST" && req.url === "/start-export") {
