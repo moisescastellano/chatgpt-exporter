@@ -10,8 +10,9 @@ const checks = [
   ["requests active inventory explicitly", /is_archived:\s*String\(isArchived\)/.test(runner) && /fetchConversationInventory\(false\)/.test(runner)],
   ["requests archived inventory explicitly", /fetchConversationInventory\(true\)/.test(runner)],
   ["stores archived conversations under archived/", /\? \["archived"\]/.test(runner)],
+  ["stores standalone active conversations under conversations/", /: \["conversations"\]/.test(runner) && /join\(rootDir, "conversations"\)/.test(runner)],
   ["moves disappeared local conversations to deleted/", /targetBaseDir = join\(rootDir, "deleted"\)/.test(runner)],
-  ["regenerates Markdown under archived and deleted", /addGroup\(join\(rootDir, "archived"\)\)/.test(localExport) && /addGroup\(join\(rootDir, "deleted"\)\)/.test(localExport)],
+  ["regenerates Markdown under conversations, archived and deleted", /addGroup\(join\(rootDir, "conversations"\)\)/.test(localExport) && /addGroup\(join\(rootDir, "archived"\)\)/.test(localExport) && /addGroup\(join\(rootDir, "deleted"\)\)/.test(localExport)],
   ["root viewer exposes Archived and Deleted sections", /nav-section-hdr">Archived</.test(exportIndex) && /nav-section-hdr">Deleted</.test(exportIndex)],
   ["UI reports conversations moved to deleted", /movedToDeleted/.test(ui) && /moved to <code>deleted\/<\/code>/.test(ui)],
 ];

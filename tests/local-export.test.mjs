@@ -53,7 +53,7 @@ try {
       writeFileSync(join(base, "json", `${name}.txt`), "ignore", "utf8");
     };
 
-    writeJson(root, "active-one");
+    writeJson(join(root, "conversations"), "active-one");
     writeJson(join(root, "archived"), "archived-one");
     writeJson(join(root, "deleted"), "deleted-one");
     writeJson(join(root, "projects", "Project A"), "project-one");

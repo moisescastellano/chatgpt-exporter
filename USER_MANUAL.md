@@ -108,10 +108,11 @@ A typical export looks like this:
 ```text
 chatgpt-export/
 ├── index.html
-├── json/
-├── markdown/
-├── html/
-├── files/
+├── conversations/
+│   ├── json/
+│   ├── markdown/
+│   ├── html/
+│   └── files/
 ├── projects/
 │   └── Project Name/
 │       ├── project-info.md
@@ -134,17 +135,20 @@ chatgpt-export/
 └── logs/
 ```
 
-`json/`
+`conversations/`
+: Active conversations that are not assigned to a Project. It contains the same `json/`, `markdown/`, `html/`, and `files/` subdirectories used by the other conversation groups.
+
+`conversations/json/`
 : Raw conversation data. It is also used by Smart Resume and Markdown regeneration.
 
-`markdown/`
+`conversations/markdown/`
 : Conversations converted to Markdown.
 
-`html/`
+`conversations/html/`
 : Conversations converted to HTML.
 
-`files/`
-: Images, attachments, and generated files associated with each conversation.
+`conversations/files/`
+: Images, attachments, and generated files associated with standalone active conversations.
 
 `projects/`
 : Active Projects, Project resources, and their conversations.
@@ -169,7 +173,7 @@ ChatGPT Exporter keeps three states separate.
 
 ### Active
 
-Normal conversations are stored in the main directories or inside their corresponding Project.
+Active conversations that do not belong to a Project are stored under `conversations/`. Active Project conversations are stored inside their corresponding Project directory.
 
 ### Archived
 
@@ -512,7 +516,7 @@ This is especially useful for:
 
 Regeneration scans:
 
-- active root conversations;
+- active standalone conversations under `conversations/`;
 - Project conversations;
 - `archived/`;
 - `deleted/`.

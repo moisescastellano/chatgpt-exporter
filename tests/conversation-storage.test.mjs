@@ -32,7 +32,7 @@ try {
     }), "utf8");
   };
 
-  writeConversation(root, "active", "conv-active", 100);
+  writeConversation(join(root, "conversations"), "active", "conv-active", 100);
   writeConversation(join(root, "archived"), "arch", "conv-arch", 200);
   writeConversation(join(root, "deleted"), "gone", "conv-gone", 300);
   writeConversation(join(root, "projects", "Project A"), "project", "conv-project", 400);
@@ -59,12 +59,12 @@ try {
   });
 
   const activeRecord = buildLocalConversationIndex(root).get("conv-active");
-  mkdirSync(join(root, "markdown"), { recursive: true });
-  mkdirSync(join(root, "html"), { recursive: true });
-  mkdirSync(join(root, "files", activeRecord.fname), { recursive: true });
-  writeFileSync(join(root, "markdown", `${activeRecord.fname}.md`), "md", "utf8");
-  writeFileSync(join(root, "html", `${activeRecord.fname}.html`), "html", "utf8");
-  writeFileSync(join(root, "files", activeRecord.fname, "a.txt"), "file", "utf8");
+  mkdirSync(join(root, "conversations", "markdown"), { recursive: true });
+  mkdirSync(join(root, "conversations", "html"), { recursive: true });
+  mkdirSync(join(root, "conversations", "files", activeRecord.fname), { recursive: true });
+  writeFileSync(join(root, "conversations", "markdown", `${activeRecord.fname}.md`), "md", "utf8");
+  writeFileSync(join(root, "conversations", "html", `${activeRecord.fname}.html`), "html", "utf8");
+  writeFileSync(join(root, "conversations", "files", activeRecord.fname, "a.txt"), "file", "utf8");
 
   ok("moves JSON, Markdown, HTML and files together", () => {
     const target = join(root, "archived");
@@ -73,7 +73,7 @@ try {
     assert.equal(existsSync(join(target, "markdown", `${activeRecord.fname}.md`)), true);
     assert.equal(existsSync(join(target, "html", `${activeRecord.fname}.html`)), true);
     assert.equal(readFileSync(join(target, "files", activeRecord.fname, "a.txt"), "utf8"), "file");
-    assert.equal(existsSync(join(root, "json", `${activeRecord.fname}.json`)), false);
+    assert.equal(existsSync(join(root, "conversations", "json", `${activeRecord.fname}.json`)), false);
   });
 
   ok("can move an archived conversation to deleted without losing its filename", () => {

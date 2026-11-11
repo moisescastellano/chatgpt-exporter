@@ -56,6 +56,8 @@ These features have been added in this fork and may not be available in the upst
 
 The raw conversation JSON remains the canonical local copy. Markdown can therefore be regenerated later with different formatting options without downloading the conversation again.
 
+Standalone active conversations use the same four-folder layout as archived, deleted, and Project conversations, under `conversations/{files,html,json,markdown}`.
+
 ## Documentation
 
 See the [User Manual](USER_MANUAL.md) for detailed usage, Smart Resume behavior, Markdown options, archived/deleted conversations, attachments, and ChatGPT-generated `sandbox:/...` files.
@@ -67,13 +69,14 @@ See [Rate limiting notes](RATE_LIMITING.md) for the exporter strategy, the commu
 ```text
 chatgpt-export/
 ├── index.html        ← HTML viewer with search and iframe navigation
-├── json/             ← raw conversation JSON
-├── markdown/         ← readable Markdown per conversation
-├── html/             ← browseable HTML with conversation sidebar
-├── files/
-│   └── Conversation Name_<id>/
-│       ├── .file-map.json  ← exact ChatGPT file ID → local file mapping
-│       └── ...             ← downloaded images and attachments
+├── conversations/    ← active conversations not assigned to a Project
+│   ├── json/         ← raw conversation JSON
+│   ├── markdown/     ← readable Markdown per conversation
+│   ├── html/         ← browseable HTML conversations
+│   └── files/
+│       └── Conversation Name_<id>/
+│           ├── .file-map.json  ← exact ChatGPT file ID → local file mapping
+│           └── ...             ← downloaded images and attachments
 ├── projects/
 │   └── Project Name/
 │       ├── project-info.md
